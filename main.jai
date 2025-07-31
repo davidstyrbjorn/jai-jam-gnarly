@@ -27,6 +27,8 @@ ROWS: s16 : 41;
 tile_w: s16 = 24;
 tile_h: s16 = 24;
 
+PLAYER_COLOR :: rl.Color.{ 255, 0, 255, 255 };
+
 GameState :: struct {
   glitcher_counter: float = 0.0;
 
@@ -110,8 +112,10 @@ Entity :: struct {
   pos: SVector;
   offset: Vector2;
   color: rl.Color;
+  background: rl.Color;
   glyph: int;
   move_tick: s16;
+  alpha_modifier: float = 1.0;
   
   door_connections: [..]SVector;
 
@@ -122,7 +126,7 @@ Entity :: struct {
   swipe_counter: float;
 }
 
-NUM_ENTITY_KIND :: 7;
+NUM_ENTITY_KIND :: 8;
 Entity_Kind :: enum u32 {
   PLAYER;
   ENEMY;
@@ -131,6 +135,7 @@ Entity_Kind :: enum u32 {
   LEVER;
   PIT;
   KILL_TILE;
+  DEAD_MARTYR;
 }
 
 entity_world_init :: (world: *EntityWorld) {
@@ -332,6 +337,18 @@ create_door :: (pos: SVector) {
   entity_world_add(*world, door);
 }
 
+create_dead_martyr :: (pos_x: s16, pos_y: s16) {
+  dead_martyr: Entity;
+  dead_martyr.kind = .DEAD_MARTYR;
+
+  dead_martyr.pos = xy(pos_x, pos_y);
+  dead_martyr.color = PLAYER_COLOR;
+  dead_martyr.alpha_modifier = 0.25;
+  dead_martyr.glyph = MARTYR_GLYPH;
+
+  entity_world_add(*world, dead_martyr);
+}
+
 create_kill_tile :: (pos_x: s16, pos_y: s16) {
   kill_tile: Entity;
   kill_tile.kind = .KILL_TILE;
@@ -400,7 +417,6 @@ create_enemy :: (pos: SVector) {
 }
 
 create_player :: () {
-
   set_player_pos :: (player: *Entity, x: s16, y: s16) {
     command: Command;
     set(*command, PlayerMove.{ player.pos, xy(x, y), player });
@@ -416,10 +432,16 @@ create_player :: () {
     walkable, kind := is_walkable(new_pos);
     // Did we die? TODO: This will depend on the current state, certain characters won't die etc
     if kind == .KILL_TILE {
-      print("DEATH!\n");
+      // If we're a MARTYR character, we should remove the KILL_TILE and replace it with a dead martyr that we can walk over
+      if player.character_type == .MARTYR {
+        entity_world_remove(*world, find_entity_at(new_pos).id);
+        create_dead_martyr(new_pos.x, new_pos.y);
+      }
+
       command: Command;
       set(*command, PlayerDied.{});
       entity_world_push_command(*world, command); 
+
       return false;
     }
     if player.character_type == .SWIPER && kind == .ENEMY {
@@ -429,6 +451,13 @@ create_player :: () {
       set(*command, PlayerDied.{});
       entity_world_push_command(*world, command); 
       return false;
+    }
+    if player.character_type == .TINKERER && kind == .LEVER {
+      lever := find_entity_at(new_pos);
+      for lever.door_connections {
+        door := find_entity_at(it);
+        door.door_open = true;
+      }
     }
     if (!game_state.edit_mode && !walkable) || !is_valid(new_pos) || kind == .ENEMY then return false;
 
@@ -462,10 +491,14 @@ create_player :: () {
       if rl.IsKeyPressed(.KEY_W) move_player(player, 0, -1);
     }
 
-    if player.character_type == .TINKERER {
-      
+    check_for_lever :: (at: SVector) -> *Entity {
+      maybe_lever := find_entity_at(at);
+      if maybe_lever != null && maybe_lever.kind == .LEVER {
+        return maybe_lever;
+      }
+      return null;
     }
-    
+
     // Process death
     for world.commands {
       if isa(it, PlayerDied) {
@@ -479,11 +512,12 @@ create_player :: () {
     }
     if rl.IsKeyPressed(.KEY_TAB) then game_state.edit_mode = !game_state.edit_mode;
     if rl.IsKeyPressed(.KEY_P) then print_level();
+    if rl.IsKeyPressed(.KEY_SPACE) then player.character_type = (player.character_type + 1) % CHARACTER_GLYPHS.count;
   }
 
   render_player :: (player: *Entity) {
     player_cell := *buffer[player.pos.x][player.pos.y];
-    player_cell.fg = color(255, 0, 255, 255);
+    player_cell.fg = PLAYER_COLOR;
     player_cell.glyph = player.glyph;
   }
 
@@ -566,6 +600,7 @@ find_entity_at :: (pos: SVector) -> *Entity {
   return null;
 }
 
+/*
 edit_system :: (dt: float) {
   if !game_state.edit_mode then return;
 
@@ -668,16 +703,20 @@ edit_system :: (dt: float) {
     }
   }
 }
+*/
 
 glyph_basic_render_system :: () {
   for *world.entities {
     if is_basic_rendered(it.kind) {
       cell := *buffer[it.pos.x][it.pos.y];
+      
       cell.fg = it.color;
+      cell.bg = it.background;
 
       if game_state.edit_mode {
         cell.fg.a = 255;
       }
+
       
       cell.glyph = it.glyph;
     }
@@ -685,7 +724,7 @@ glyph_basic_render_system :: () {
 }
 
 is_basic_rendered :: (kind: Entity_Kind) -> bool {
-  return kind == .WALL || kind == .ENEMY || kind == .KILL_TILE || kind == .DOOR || kind == .LEVER || kind == .PIT;
+  return kind == .WALL || kind == .ENEMY || kind == .KILL_TILE || kind == .DOOR || kind == .LEVER || kind == .PIT || kind == .DEAD_MARTYR;
 }
 
 glyph_basic_update_system :: (dt: float) {
@@ -695,6 +734,16 @@ glyph_basic_update_system :: (dt: float) {
       for *world.entities {
         if is_basic_rendered(it.kind) {
           it.color.a = get_lit_alpha(player_move.player.pos, it.pos, 9);
+
+          // Dead martyrs light up the world
+          for dead_martyr : world.entity_groups[Entity_Kind.DEAD_MARTYR] {
+            new_alpha := it.color.a.(u64) + get_lit_alpha(dead_martyr.pos, it.pos, 6).(u64);
+            max_alpha: u64 = 255;
+            new_alpha = min(max_alpha, new_alpha);
+            it.color.a = new_alpha.(u8);
+          }
+
+          it.color.a = (it.color.a * it.alpha_modifier).(u8);
         }
       }
     }
@@ -723,7 +772,7 @@ main :: () {
   set(*command, PlayerMove.{ player.pos, player.pos, player });
   entity_world_push_command(*world, command);
 
-  rl.GuiSetStyle(0, rl.GuiDefaultProperty.TEXT_SIZE.(s32), 20);
+  // rl.GuiSetStyle(0, rl.GuiDefaultProperty.TEXT_SIZE.(s32), 20);
 
   while !rl.WindowShouldClose() {
     memory_visualizer_per_frame_update();
@@ -750,7 +799,7 @@ main :: () {
         }
       }
 
-      edit_system(rl.GetFrameTime());
+      // edit_system(rl.GetFrameTime());
 
     rl.EndDrawing();
   }
