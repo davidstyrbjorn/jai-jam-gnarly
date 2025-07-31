@@ -459,8 +459,19 @@ create_player :: () {
         door.door_open = true;
       }
     }
+    if player.character_type == .CRAZY && kind == .PIT {
+      // We can move directly over the pit to the other side of it here!
+
+      return true;
+    }
     if (!game_state.edit_mode && !walkable) || !is_valid(new_pos) || kind == .ENEMY then return false;
 
+    if player.character_type == .CRAZY {
+      // Dice roll for crazy walk
+      if random_get() % 100 > 50 { // 50/50 might be crazy
+
+      }
+    }
     set_player_pos(player, new_pos.x, new_pos.y);
 
     if player.character_type == .SWIPER && is_zero(player.swiping_dir) {
@@ -751,7 +762,7 @@ glyph_basic_update_system :: (dt: float) {
 }
 
 main :: () {
-  rl.InitWindow(COLS * tile_w, ROWS * tile_h, "Glyph Test");
+  rl.InitWindow(COLS * tile_w, ROWS * tile_h, "JaiJam - Loop Gang");
   rl.SetTargetFPS(60);
   font := rl.LoadFontEx("./font.ttf", tile_w, null, 0);
 
