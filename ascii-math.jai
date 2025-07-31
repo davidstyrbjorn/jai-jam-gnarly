@@ -1,4 +1,10 @@
 
+SWIPER_GLYPH :: 115;
+TINKERER_GLYPH :: 116;
+MARTYR_GLYPH :: 109;
+CRAZY_GLYPH :: 99;
+CHARACTER_GLYPHS :: int.[SWIPER_GLYPH, TINKERER_GLYPH, MARTYR_GLYPH, CRAZY_GLYPH]; // Order matters
+
 Node :: struct {
   pos: SVector;
   g_cost: s16;
@@ -40,7 +46,8 @@ has_line_of_sight :: (from: *Entity, to: *Entity, max_distance: s16) -> bool, fl
 
   while n > 0 {
 
-    if !is_walkable(xy(x, y)) return false, 0.0; // Lose state, hard ray
+    walkable, _ := is_walkable(xy(x, y));
+    if !walkable return false, 0.0; // Lose state, hard ray
 
     if x == to.pos.x && y == to.pos.y {
       t := 1.0 - (distance_walked.(float) / max_distance);
@@ -113,7 +120,8 @@ move_enemy_towards_player :: (player: *Entity, enemy: *Entity) -> bool {
 
       // Not a valid position, or already visited?
       if !is_valid(new_pos) then continue;
-      if closed[new_pos.x][new_pos.y] || !is_walkable(new_pos) then continue;
+      walkable, _ := is_walkable(new_pos);
+      if closed[new_pos.x][new_pos.y] || !walkable then continue;
       by_id, occupied := is_occupied_by_enemy(new_pos);
       if occupied && by_id != enemy.id then continue; // Avoid walking into another enemy 
 
@@ -170,4 +178,9 @@ get_lit_alpha :: (light_pos: SVector, from: SVector, dist_to_dark: s16) -> u8 {
   }
   t := 1.0 - euclidian_distance.(float)/dist_to_dark;
   return (255 * t).(u8);
+}
+
+is_direct_neighbour :: (pos1: SVector, pos2: SVector) -> bool {
+    return (abs(pos1.x - pos2.x) == 1 && pos1.y == pos2.y) ||
+           (pos1.x == pos2.x && abs(pos1.y - pos2.y) == 1);
 }

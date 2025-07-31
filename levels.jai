@@ -1,12 +1,7 @@
 
-NUM_LEVELS :: 1;
-
-level_factory :: #type ();
-levels := level_factory.[create_level_1];
-
-create_level_1 :: () {
+create_level :: () {
   #insert -> string {
-    code, success := read_entire_file("levels.jai.in");
+    code, success := read_entire_file("level.in");
     assert(success);
     return code;
   }

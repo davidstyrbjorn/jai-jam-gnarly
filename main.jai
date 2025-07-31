@@ -28,10 +28,12 @@ tile_w: s16 = 24;
 tile_h: s16 = 24;
 
 GameState :: struct {
-  edit_mode: bool = false;
-  current_level: int = 0;
   glitcher_counter: float = 0.0;
+
+  // Used for editing
+  edit_mode: bool = false;
   selected_point: SVector;
+  connecting_to_door: bool = false;
 }
 game_state: GameState;
 world: EntityWorld;
@@ -44,7 +46,18 @@ operator == :: (left: SVector, right: SVector) -> bool {
   return left.x == right.x && left.y == right.y;
 }
 
+is_zero :: (s: SVector) -> bool {
+  return s.x == 0 && s.y == 0;
+}
+
 buffer: [COLS][ROWS]Cell;
+
+CharacterType :: enum {
+  SWIPER :: 0;
+  TINKERER :: 1;
+  MARTYR :: 2;
+  CRAZY :: 3;
+}
 
 /// --- BEGIN ENTITY 
 
@@ -54,7 +67,11 @@ PlayerMove :: struct {
   player: *Entity;
 }
 
-Command :: Tagged_Union(PlayerMove);
+PlayerDied :: struct {
+
+}
+
+Command :: Tagged_Union(PlayerMove, PlayerDied);
 
 EntityWorld :: struct {
   entities: [..]Entity;   
@@ -89,6 +106,7 @@ Entity :: struct {
   kind: Entity_Kind;
   behaviour: u16;
 
+  spawn_pos: SVector;
   pos: SVector;
   offset: Vector2;
   color: rl.Color;
@@ -98,6 +116,10 @@ Entity :: struct {
   door_connections: [..]SVector;
 
   door_open: bool;
+
+  character_type: CharacterType;
+  swiping_dir: SVector;
+  swipe_counter: float;
 }
 
 NUM_ENTITY_KIND :: 7;
@@ -218,30 +240,25 @@ is_valid :: (pos: SVector) -> bool {
   return pos.x >= 0 && pos.x < COLS && pos.y >= 0 && pos.y < ROWS;
 }
 
-is_walkable :: (pos: SVector) -> bool {
+is_walkable :: (pos: SVector) -> bool, Entity_Kind {
   entity := find_entity_at(pos);
   if entity == null {
-    return true;
+    return true, Entity_Kind.PLAYER;
   }
 
-  print("entity.kind = %\n", entity.kind);
-
   if entity.kind == .DOOR {
-    return entity.door_open;
+    return entity.door_open, Entity_Kind.DOOR;
   }
 
   if entity.kind == {
-    case .PLAYER; #through;
-    case .ENEMY; #through;
     case .WALL; #through;
     case .LEVER; #through;
     case .PIT; #through;
-    case .KILL_TILE; return false;
+    case .KILL_TILE; return false, entity.kind;
   }
 
-  return true;
+  return true, entity.kind;
 }
-
 is_occupied_by_enemy :: (pos: SVector) -> u32, bool {
   for world.entity_groups[Entity_Kind.ENEMY] {
     if it.pos.x == pos.x && it.pos.y == pos.y then return it.id, true;
@@ -297,13 +314,20 @@ create_lever :: (pos: SVector) {
 }
 
 create_door :: (pos: SVector) {
+
+  door_update :: (door: *Entity, dt: float) {
+    if(door.door_open) {
+      door.color.a = 0;
+    }
+  }
+
   door: Entity;
-
   door.kind = .DOOR;
-
   door.pos = pos;
   door.color = color(0, 139, 139, 255);
   door.glyph = 68;
+
+  door.update_proc = door_update;
 
   entity_world_add(*world, door);
 }
@@ -324,9 +348,20 @@ create_enemy :: (pos: SVector) {
   enemy.kind = .ENEMY;
 
   enemy_update :: (enemy: *Entity, dt: float) {
+    if game_state.edit_mode {
+      enemy.color = color(90, 90, 90, 255);
+      enemy.move_tick = 0;
+      return;
+    }
+
     for world.commands {
       player_move := isa(it, PlayerMove);
       if player_move {
+        // The enemy doesn't react to the swiper character
+        if player_move.player.character_type == .SWIPER {
+          return;
+        }
+
         sees_player, t := has_line_of_sight(enemy, player_move.player, 8);
         if sees_player {
           enemy.color = color(255, 20, 50, 255);
@@ -337,8 +372,18 @@ create_enemy :: (pos: SVector) {
         // Move?
         enemy.move_tick += 1;
         if enemy.move_tick % 2 == 0 && has_line_of_sight(enemy, player_move.player, 8) {
-          move_enemy_towards_player(player_move.player, enemy);
+          // Check if we're neighbouring to the player, if so lets go ahead and kill them 
+          if is_direct_neighbour(player_move.new_pos, enemy.pos) {
+            cmd: Command;
+            set(*cmd, PlayerDied.{});
+            entity_world_push_command(*world, cmd);
+          }else {
+            move_enemy_towards_player(player_move.player, enemy);
+          }
         }
+      }
+      else if isa(it, PlayerDied) {
+        enemy.pos = enemy.spawn_pos;
       }
     }
   }
@@ -346,6 +391,7 @@ create_enemy :: (pos: SVector) {
   enemy.update_proc = enemy_update;
 
   enemy.pos = pos;
+  enemy.spawn_pos = pos;
   enemy.move_tick = 0;
   enemy.color = color(90, 90, 90, 255);
   enemy.glyph = 69;
@@ -354,32 +400,84 @@ create_enemy :: (pos: SVector) {
 }
 
 create_player :: () {
-  move_player :: (player: *Entity, dx: s16, dy: s16) {
-    new_pos := xy(player.pos.x + dx, player.pos.y + dy);
-    // Check for wall
-    if (!game_state.edit_mode && !is_walkable(new_pos)) || !is_valid(new_pos) then return;
 
+  set_player_pos :: (player: *Entity, x: s16, y: s16) {
     command: Command;
-    set(*command, PlayerMove.{ player.pos, new_pos, player });
+    set(*command, PlayerMove.{ player.pos, xy(x, y), player });
     entity_world_push_command(*world, command);
 
-    player.pos = new_pos;
+    player.pos = xy(x, y);
+  }
+
+  // Return true or false depending on if we successfully moved or not
+  move_player :: (player: *Entity, dx: s16, dy: s16) -> bool {
+    new_pos := xy(player.pos.x + dx, player.pos.y + dy);
+    // Check for wall
+    walkable, kind := is_walkable(new_pos);
+    // Did we die? TODO: This will depend on the current state, certain characters won't die etc
+    if kind == .KILL_TILE {
+      print("DEATH!\n");
+      command: Command;
+      set(*command, PlayerDied.{});
+      entity_world_push_command(*world, command); 
+      return false;
+    }
+    if player.character_type == .SWIPER && kind == .ENEMY {
+      // Yo! The swiper has moved into an enemy, kill it and kill the player
+      entity_world_remove(*world, find_entity_at(new_pos).id);
+      command: Command;
+      set(*command, PlayerDied.{});
+      entity_world_push_command(*world, command); 
+      return false;
+    }
+    if (!game_state.edit_mode && !walkable) || !is_valid(new_pos) || kind == .ENEMY then return false;
+
+    set_player_pos(player, new_pos.x, new_pos.y);
+
+    if player.character_type == .SWIPER && is_zero(player.swiping_dir) {
+      player.swiping_dir = xy(dx, dy);
+      player.swipe_counter = 0;
+    }
+
+    return true;
   }
  
   update_player :: (player: *Entity, dt: float) {
-    if rl.IsKeyPressed(.KEY_D) move_player(player, 1, 0);
-    if rl.IsKeyPressed(.KEY_A) move_player(player, -1, 0);
-    if rl.IsKeyPressed(.KEY_S) move_player(player, 0, 1);
-    if rl.IsKeyPressed(.KEY_W) move_player(player, 0, -1);
+    player.glyph = CHARACTER_GLYPHS[player.character_type];
 
-    if rl.IsKeyPressed(.KEY_C) {
-      create_wall(xy(player.pos.x, player.pos.y)); // Give birth, right here, right now
-      // create_enemy(world, xy(player.pos.x, player.pos.y)); // Give birth, right here, right now
-      // create_glitcher(player.pos.x, player.pos.y); // Give birth, right here, right now
+    SWIPE_MOVE_FREQ :: 0.1; // Seconds
+    if player.character_type == .SWIPER && !is_zero(player.swiping_dir) {
+      player.swipe_counter += dt;
+      if player.swipe_counter > SWIPE_MOVE_FREQ {
+        player.swipe_counter = 0;
+        finished := !move_player(player, player.swiping_dir.x, player.swiping_dir.y);
+        if finished {
+          player.swiping_dir = xy(0, 0);
+        }
+      }
+    }else {
+      if rl.IsKeyPressed(.KEY_D) move_player(player, 1, 0);
+      if rl.IsKeyPressed(.KEY_A) move_player(player, -1, 0);
+      if rl.IsKeyPressed(.KEY_S) move_player(player, 0, 1);
+      if rl.IsKeyPressed(.KEY_W) move_player(player, 0, -1);
     }
 
-    if rl.IsKeyPressed(.KEY_TAB) then game_state.edit_mode = !game_state.edit_mode;
+    if player.character_type == .TINKERER {
+      
+    }
+    
+    // Process death
+    for world.commands {
+      if isa(it, PlayerDied) {
+        set_player_pos(player, 1, 1);
+      }
+    }
 
+    // TODO: UTILITY STUFF SHOULD NOT BE IN RELEASE BUILD
+    if rl.IsKeyPressed(.KEY_C) {
+      create_wall(xy(player.pos.x, player.pos.y)); // Give birth, right here, right now
+    }
+    if rl.IsKeyPressed(.KEY_TAB) then game_state.edit_mode = !game_state.edit_mode;
     if rl.IsKeyPressed(.KEY_P) then print_level();
   }
 
@@ -395,9 +493,19 @@ create_player :: () {
   player.render_proc = render_player;
 
   player.pos = xy(1, 1);
-  player.glyph = 64;
+  player.character_type = .SWIPER;
 
   entity_world_add(*world, player);
+}
+
+connect_lever_to_door :: (lever_pos: SVector, door_pos: SVector) {
+  lever := find_entity_at(lever_pos);
+  assert(lever != null && lever.kind == .LEVER);
+
+  door := find_entity_at(door_pos);
+  assert(door != null && door.kind == .DOOR);
+
+  array_add(*lever.door_connections, door_pos);
 }
 
 print_level :: () {
@@ -412,8 +520,22 @@ print_level :: () {
   for world.entity_groups[Entity_Kind.KILL_TILE] {
     append(*builder, tprint("create_kill_tile(%, %);\n", it.pos.x, it.pos.y));
   }
+  for world.entity_groups[Entity_Kind.PIT] {
+    append(*builder, tprint("create_pit(xy(%, %));\n", it.pos.x, it.pos.y));
+  }
+  for world.entity_groups[Entity_Kind.DOOR] {
+    append(*builder, tprint("create_door(xy(%, %));\n", it.pos.x, it.pos.y));
+  }
+  for world.entity_groups[Entity_Kind.LEVER] {
+    append(*builder, tprint("create_lever(xy(%, %));\n", it.pos.x, it.pos.y));
+    for door_pos : it.door_connections {
+      append(*builder, tprint("connect_lever_to_door(xy(%, %), xy(%, %));\n", it.pos.x, it.pos.y, door_pos.x, door_pos.y));
+    }
+  }
 
-  file_name := tprint("./level_%.jai.in", game_state.current_level);
+  // Create connection between the levers and doors!
+
+  file_name := tprint("./level.in");
   file, success := file_open(file_name, true);
   assert(success, "Failed to open level file for writing!");
   defer file_close(*file);
@@ -454,7 +576,7 @@ edit_system :: (dt: float) {
     rl.DrawRectangle(pos.x.(s32), pos.y.(s32), tile_w, tile_h, color(20, 255, 30, 100));
   }
   
-  if rl.IsMouseButtonPressed(.MOUSE_BUTTON_LEFT) && game_state.selected_point.x == -1 {
+  if rl.IsMouseButtonPressed(.MOUSE_BUTTON_LEFT) && (game_state.selected_point.x == -1 || game_state.connecting_to_door) {
     mouse_pos := rl.GetMousePosition();
     mouse_pos.x /= rl.GetScreenWidth();
     mouse_pos.y /= rl.GetScreenHeight();
@@ -463,6 +585,18 @@ edit_system :: (dt: float) {
     grid_pos.x = (mouse_pos.x * COLS).(s16); 
     grid_pos.y = (mouse_pos.y * ROWS).(s16); 
 
+    // Check if we're assigning door to a lever
+    if game_state.connecting_to_door {
+      maybe_door := find_entity_at(grid_pos);
+      if maybe_door != null && maybe_door.kind == .DOOR {
+        lever := find_entity_at(game_state.selected_point);
+        array_add(*lever.door_connections, grid_pos);
+        return;
+      }
+
+      game_state.connecting_to_door = false;
+    }
+
     game_state.selected_point = grid_pos;
   }
 
@@ -470,9 +604,11 @@ edit_system :: (dt: float) {
     game_state.selected_point.x = -1;
   }
 
+  if game_state.connecting_to_door {
+    rl.GuiLabel(rl.Rectangle.{0, 50, 100, 50} , "CONNECTING DOOR!");
+  }
+
   if rl.IsKeyDown(.KEY_LEFT_ALT) {
-    // Display some basic level info
-    rl.GuiLabel(rl.Rectangle.{0, 0, 100, 100}, to_c_string(tprint("level = %", game_state.current_level)));
     e := find_entity_at(game_state.selected_point);
     height := rl.GetScreenHeight().(float);
     if e != null {
@@ -482,6 +618,27 @@ edit_system :: (dt: float) {
       if rl.GuiButton(rl.Rectangle.{10, height-50, 100, 50}, "Delete") {
         entity_world_remove(*world, e.id);
         return;
+      }
+      if e.kind == .DOOR {
+        if rl.GuiButton(rl.Rectangle.{110, height-50, 100, 50}, "CLOPEN") {
+          e.door_open = !e.door_open;
+          return;
+        }
+      }
+      if e.kind == .LEVER {
+        if rl.GuiButton(rl.Rectangle.{110, height-50, 100, 50}, "CONNECT") {
+          game_state.connecting_to_door = true;
+          return;
+        }
+        if rl.GuiButton(rl.Rectangle.{220, height-50, 100, 50}, "PULL") {
+          for e.door_connections {
+            door := find_entity_at(it);
+            assert(door != null && door.kind == .DOOR);
+            door.door_open = true;
+          }
+          return;
+        }
+        rl.GuiLabel(rl.Rectangle.{ 330, height-50, 100, 50 }, to_c_string(tprint("doors = %", e.door_connections.count)));
       }
     }else if game_state.selected_point.x != -1 {
       if rl.GuiButton(rl.Rectangle.{10+80*0, height-50, 80, 30}, "WALL") {
@@ -502,6 +659,10 @@ edit_system :: (dt: float) {
       }
       if rl.GuiButton(rl.Rectangle.{10+80*4, height-50, 80, 30}, "KILL") {
         create_kill_tile(game_state.selected_point.x, game_state.selected_point.y);
+        game_state.selected_point.x = -1;
+      }
+      if rl.GuiButton(rl.Rectangle.{10+80*5, height-50, 80, 30}, "ENEMY") {
+        create_enemy(game_state.selected_point);
         game_state.selected_point.x = -1;
       }
     }
@@ -552,7 +713,7 @@ main :: () {
 
   // Fill up the world
   create_player();
-  levels[game_state.current_level]();
+  create_level();
 
   entity_world_rebuild(*world);
 
