@@ -371,7 +371,6 @@ create_fire :: (pos: SVector) {
     if fire.fire_t > FIRE_UPDATE_FREQ {
       fire.fire_t = 0;
       fire.glyph = FIRE_GLYPHS[random_get() % FIRE_GLYPHS.count];
-      print("glyph = %\n", fire.glyph);
     }
   }
 
@@ -464,10 +463,9 @@ create_player :: () {
     new_pos := xy(player.pos.x + dx, player.pos.y + dy);
     // Check for wall
     walkable, kind := is_walkable(new_pos);
-    // Did we die? TODO: This will depend on the current state, certain characters won't die etc
     if kind == .KILL_TILE {
-      // If we're a MARTYR character, we should remove the KILL_TILE and replace it with a dead martyr that we can walk over
-      if player.character_type == .MARTYR {
+      // Mechanic "Martyrs can cover up KILL TILES"
+      if player.character_type == .MARTYR  {
         entity_world_remove(*world, find_entity_at(new_pos).id);
         create_dead_martyr(new_pos.x, new_pos.y);
       }
@@ -475,7 +473,12 @@ create_player :: () {
       command: Command;
       set(*command, PlayerDied.{});
       entity_world_push_command(*world, command); 
-
+      return false;
+    }
+    if kind == .FIRE && player.character_type != .SWIPER {
+      command: Command;
+      set(*command, PlayerDied.{});
+      entity_world_push_command(*world, command); 
       return false;
     }
     if player.character_type == .SWIPER && kind == .ENEMY {
@@ -906,7 +909,7 @@ main :: () {
   game_state.loop[0] = CharacterType.DIGGER;
   game_state.loop[1] = CharacterType.MARTYR;
   game_state.loop[2] = CharacterType.MARTYR;
-  game_state.loop[3] = CharacterType.TINKERER;
+  game_state.loop[3] = CharacterType.SWIPER;
 
   // Push initial move command so every glyph gets correctly lit up
   command: Command;
