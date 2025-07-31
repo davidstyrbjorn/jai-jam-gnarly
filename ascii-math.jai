@@ -15,6 +15,8 @@ Node :: struct {
   f_cost: s16;
 }
 
+FIRE_GLYPHS :: int.[126, 42, 46];
+
 Cell :: struct {
   glyph: int;
   fg, bg: rl.Color;  

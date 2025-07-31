@@ -15,6 +15,9 @@ ENHANCED_PLAYER_LIGHT_STR :: COLS.(float);
 
 STANDING_ON_WALL_BG :: rl.Color.{ 100, 100, 100, 100 };
 
+FIRE_COLOR_1 :: rl.Color.{ 255,90,0,50 };
+FIRE_COLOR_2 :: rl.Color.{ 255,154,0,50 };
+
 GameState :: struct {
   glitcher_counter: float = 0.0;
 
@@ -118,9 +121,11 @@ Entity :: struct {
   character_type: CharacterType;
   swiping_dir: SVector;
   swipe_counter: float;
+
+  fire_t: float;
 }
 
-NUM_ENTITY_KIND :: 9;
+NUM_ENTITY_KIND :: 10;
 Entity_Kind :: enum u32 {
   PLAYER;
   ENEMY;
@@ -128,6 +133,7 @@ Entity_Kind :: enum u32 {
   DOOR;
   LEVER;
   KILL_TILE;
+  FIRE;
   DEAD_MARTYR;
   MOD_STATION;
   DIGGABLE;
@@ -356,6 +362,36 @@ create_kill_tile :: (pos_x: s16, pos_y: s16) {
   kill_tile.glyph = cast(int)(32 + random_get() % (126-32));
 
   entity_world_add(*world, kill_tile);
+}
+
+create_fire :: (pos: SVector) {
+  fire_update :: (fire: *Entity, dt: float) {
+    FIRE_UPDATE_FREQ :: .2;
+    fire.fire_t += dt;
+    if fire.fire_t > FIRE_UPDATE_FREQ {
+      fire.fire_t = 0;
+      fire.glyph = FIRE_GLYPHS[random_get() % FIRE_GLYPHS.count];
+      print("glyph = %\n", fire.glyph);
+    }
+  }
+
+  fire_render :: (fire: *Entity) {
+    cell := *buffer[fire.pos.x][fire.pos.y];
+    cell.fg = fire.color;
+    cell.bg = fire.background;
+    cell.glyph = fire.glyph;
+  }
+
+  fire: Entity;
+  fire.kind = .FIRE;
+
+  fire.pos = pos;
+  fire.color = color(255, 0, 0, 100);
+  fire.background = FIRE_COLOR_1;
+  fire.update_proc = fire_update;
+  fire.render_proc = fire_render;
+
+  entity_world_add(*world, fire);
 }
 
 create_enemy :: (pos: SVector) {
@@ -732,6 +768,10 @@ edit_system :: (dt: float) {
         create_wall(game_state.selected_point, true);
         game_state.selected_point.x = -1;
       }
+      if rl.GuiButton(rl.Rectangle.{10+80*7, height-50, 80, 30}, "FIRE") {
+        create_fire(game_state.selected_point);
+        game_state.selected_point.x = -1;
+      }
     }
   }
 }
@@ -778,6 +818,13 @@ glyph_basic_update_system :: (dt: float) {
           // Dead martyrs light up the world
           for dead_martyr : world.entity_groups[Entity_Kind.DEAD_MARTYR] {
             new_alpha := it.color.a.(u64) + get_lit_alpha(dead_martyr.pos, it.pos, 6).(u64);
+            max_alpha: u64 = 255;
+            new_alpha = min(max_alpha, new_alpha);
+            it.color.a = new_alpha.(u8);
+          }
+
+          for fire : world.entity_groups[Entity_Kind.FIRE] {
+            new_alpha := it.color.a.(u64) + get_lit_alpha(fire.pos, it.pos, 6).(u64);
             max_alpha: u64 = 255;
             new_alpha = min(max_alpha, new_alpha);
             it.color.a = new_alpha.(u8);
@@ -841,7 +888,7 @@ render_ui_system :: () {
 main :: () {
   rl.InitWindow(COLS * tile_w, ROWS * tile_h, "JaiJam - Loop Gang");
   rl.SetTargetFPS(60);
-  font := rl.LoadFontEx("./font.ttf", tile_w, null, 0);
+  font := rl.LoadFontEx("./CozetteCrossedSevenVector.ttf", tile_w, null, 0);
 
   entity_world_init(*world);
   array_add(*world.update_systems, kill_tile_system);
@@ -889,7 +936,12 @@ main :: () {
           // Draw the glyph
           glyph_index := rl.GetGlyphIndex(font, cell.glyph.(s32));
           rec := font.recs[glyph_index];
-          pos := xy((x*tile_w).(float), (y*tile_h).(float));
+          
+          // Calculate the centered position for the glyph inside the tile
+          pos_x := (x * tile_w) + (tile_w - rec.width)  / 2;
+          pos_y := (y * tile_h) + (tile_h - rec.height) / 2;
+          pos := xy(pos_x.(float), pos_y.(float));
+          
           rl.DrawTextureRec(font.texture, rec, pos, cell.fg);
         }
       }
