@@ -18,6 +18,9 @@ STANDING_ON_WALL_BG :: rl.Color.{ 100, 100, 100, 100 };
 FIRE_COLOR_1 :: rl.Color.{ 255,90,0,50 };
 FIRE_COLOR_2 :: rl.Color.{ 255,154,0,50 };
 
+CYCLE_START_X :: 3;
+CYCLE_Y :: UI_START_Y + 3;
+
 GameState :: struct {
   glitcher_counter: float = 0.0;
 
@@ -25,10 +28,12 @@ GameState :: struct {
   edit_mode: bool = false;
   selected_point: SVector;
   connecting_to_door: bool = false;
+  editing_loop_index: int = -1;
 
   loop: [4]CharacterType;
   current_loop_idx: int = 0;
   iterations: int = 0;
+
 
   player_light_strength: float = NORMAL_PLAYER_LIGHT_STR;
   prev_light_strength: s16;
@@ -686,6 +691,17 @@ edit_system :: (dt: float) {
     grid_pos.x = (mouse_pos.x * COLS).(s16); 
     grid_pos.y = (mouse_pos.y * ROWS).(s16); 
 
+    // We want to be able to modify the loop easily, so initiate that here
+    if grid_pos.y == CYCLE_Y {
+      idx := 0;
+      for x: CYCLE_START_X..CYCLE_START_X+3 {
+        if grid_pos.x == x {
+          game_state.editing_loop_index = idx;
+        }
+        idx += 1;
+      }
+    }
+
     // Check if we're assigning door to a lever
     if game_state.connecting_to_door {
       maybe_door := find_entity_at(grid_pos);
@@ -703,6 +719,7 @@ edit_system :: (dt: float) {
 
   if rl.IsMouseButtonPressed(.MOUSE_BUTTON_RIGHT) {
     game_state.selected_point.x = -1;
+    game_state.editing_loop_index = -1;
   }
 
   if rl.IsKeyPressed(.KEY_DELETE) {
@@ -711,8 +728,33 @@ edit_system :: (dt: float) {
   }
 
   if rl.IsKeyDown(.KEY_LEFT_ALT) {
-    e := find_entity_at(game_state.selected_point);
     height := rl.GetScreenHeight().(float);
+    if game_state.editing_loop_index != -1 {
+      btn_pressed := false;
+      if rl.GuiButton(rl.Rectangle.{120*0, height-50, 100, 30}, "SWIPER") {
+        game_state.loop[game_state.editing_loop_index] = .SWIPER;
+        btn_pressed = true;
+      }
+      if rl.GuiButton(rl.Rectangle.{120*1, height-50, 100, 30}, "TINKERER") {
+        game_state.loop[game_state.editing_loop_index] = .TINKERER;
+        btn_pressed = true;
+      } 
+      if rl.GuiButton(rl.Rectangle.{120*2, height-50, 100, 30}, "MARTYR") {
+        game_state.loop[game_state.editing_loop_index] = .MARTYR;
+        btn_pressed = true;
+      } 
+      if rl.GuiButton(rl.Rectangle.{120*3, height-50, 100, 30}, "DIGGER") {
+        game_state.loop[game_state.editing_loop_index] = .DIGGER;
+        btn_pressed = true;
+      } 
+      if btn_pressed {
+        game_state.editing_loop_index = -1;
+        game_state.selected_point.x = -1;
+      }
+      return;
+    }
+
+    e := find_entity_at(game_state.selected_point);
     if e != null {
       str_buffer := to_c_string(tprint("ID = %, Kind = %", e.id, e.kind));
       defer free(str_buffer);
@@ -743,35 +785,35 @@ edit_system :: (dt: float) {
         rl.GuiLabel(rl.Rectangle.{ 330, height-50, 100, 50 }, to_c_string(tprint("doors = %", e.door_connections.count)));
       }
     }else if game_state.selected_point.x != -1 {
-      if rl.GuiButton(rl.Rectangle.{10+80*0, height-50, 80, 30}, "WALL") {
+      if rl.GuiButton(rl.Rectangle.{100*0, height-50, 90, 30}, "WALL") {
         create_wall(game_state.selected_point);
         game_state.selected_point.x = -1;
       }
-      if rl.GuiButton(rl.Rectangle.{10+80*1, height-50, 80, 30}, "DOOR") {
+      if rl.GuiButton(rl.Rectangle.{100*1, height-50, 90, 30}, "DOOR") {
         create_door(game_state.selected_point);
         game_state.selected_point.x = -1;
       }
-      if rl.GuiButton(rl.Rectangle.{10+80*2, height-50, 80, 30}, "LEVER") {
+      if rl.GuiButton(rl.Rectangle.{100*2, height-50, 90, 30}, "LEVER") {
         create_lever(game_state.selected_point);
         game_state.selected_point.x = -1;
       }
-      if rl.GuiButton(rl.Rectangle.{10+80*3, height-50, 80, 30}, "KILL") {
+      if rl.GuiButton(rl.Rectangle.{100*3, height-50, 90, 30}, "KILL") {
         create_kill_tile(game_state.selected_point.x, game_state.selected_point.y);
         game_state.selected_point.x = -1;
       }
-      if rl.GuiButton(rl.Rectangle.{10+80*4, height-50, 80, 30}, "ENEMY") {
+      if rl.GuiButton(rl.Rectangle.{100*4, height-50, 90, 30}, "ENEMY") {
         create_enemy(game_state.selected_point);
         game_state.selected_point.x = -1;
       }
-      if rl.GuiButton(rl.Rectangle.{10+80*5, height-50, 80, 30}, "MOD") {
+      if rl.GuiButton(rl.Rectangle.{100*5, height-50, 90, 30}, "MOD") {
         create_mod_station(game_state.selected_point);
         game_state.selected_point.x = -1;
       }
-      if rl.GuiButton(rl.Rectangle.{10+80*6, height-50, 80, 30}, "DIGGABLE") {
+      if rl.GuiButton(rl.Rectangle.{100*6, height-50, 90, 30}, "DIGGABLE") {
         create_wall(game_state.selected_point, true);
         game_state.selected_point.x = -1;
       }
-      if rl.GuiButton(rl.Rectangle.{10+80*7, height-50, 80, 30}, "FIRE") {
+      if rl.GuiButton(rl.Rectangle.{100*7, height-50, 90, 30}, "FIRE") {
         create_fire(game_state.selected_point);
         game_state.selected_point.x = -1;
       }
@@ -857,7 +899,7 @@ render_ui_system :: () {
   for x: 0..COLS-1 {
     cell := *buffer[x][y];
     cell.glyph = glyph;
-    cell.fg = rl.WHITE;
+    cell.fg = ifx game_state.edit_mode then rl.PURPLE else rl.WHITE;
   }
 
   for x: 0..COLS-1 {
@@ -868,8 +910,7 @@ render_ui_system :: () {
     }
   }
 
-  CYCLE_START_X :: 3;
-  CYCLE_Y :: UI_START_Y + 3;
+
   
   // Draw the indicator on the current loop character
   cell := *buffer[CYCLE_START_X + game_state.current_loop_idx][CYCLE_Y+1];
@@ -918,6 +959,7 @@ main :: () {
   entity_world_push_command(*world, command);
 
   rl.GuiSetStyle(0, rl.GuiDefaultProperty.TEXT_SIZE.(s32), 20);
+  game_state.selected_point.x = -1;
 
   while !rl.WindowShouldClose() {
     memory_visualizer_per_frame_update();
