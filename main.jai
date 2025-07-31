@@ -597,8 +597,6 @@ print_level :: () {
     append(*builder, tprint("create_mod_station(xy(%, %));\n", it.pos.x, it.pos.y));
   }
 
-  // Create connection between the levers and doors!
-
   file_name := tprint("./level.in");
   file, success := file_open(file_name, true);
   assert(success, "Failed to open level file for writing!");
@@ -655,10 +653,10 @@ edit_system :: (dt: float) {
       if maybe_door != null && maybe_door.kind == .DOOR {
         lever := find_entity_at(game_state.selected_point);
         array_add(*lever.door_connections, grid_pos);
-        return;
       }
 
       game_state.connecting_to_door = false;
+      return;
     }
 
     game_state.selected_point = grid_pos;
@@ -666,10 +664,6 @@ edit_system :: (dt: float) {
 
   if rl.IsMouseButtonPressed(.MOUSE_BUTTON_RIGHT) {
     game_state.selected_point.x = -1;
-  }
-
-  if game_state.connecting_to_door {
-    rl.GuiLabel(rl.Rectangle.{0, 50, 100, 50} , "CONNECTING DOOR!");
   }
 
   if rl.IsKeyPressed(.KEY_DELETE) {
