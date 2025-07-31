@@ -21,6 +21,10 @@ K - kill tile
  #   #
 */
 
+RELEASE_BUILD :: false;
+
+UI_START_Y :: 41 - 6;
+
 COLS: s16 : 41;
 ROWS: s16 : 41;
 
@@ -36,6 +40,10 @@ GameState :: struct {
   edit_mode: bool = false;
   selected_point: SVector;
   connecting_to_door: bool = false;
+  loop: [..]CharacterType;
+  current_loop_idx: int = 0;
+
+  iterations: int = 0;
 }
 game_state: GameState;
 world: EntityWorld;
@@ -121,12 +129,14 @@ Entity :: struct {
 
   door_open: bool;
 
+  override_character_type: CharacterType;
+  override_character: bool = false;
   character_type: CharacterType;
   swiping_dir: SVector;
   swipe_counter: float;
 }
 
-NUM_ENTITY_KIND :: 8;
+NUM_ENTITY_KIND :: 9;
 Entity_Kind :: enum u32 {
   PLAYER;
   ENEMY;
@@ -136,6 +146,7 @@ Entity_Kind :: enum u32 {
   PIT;
   KILL_TILE;
   DEAD_MARTYR;
+  OVERRIDE_CHARACTER;
 }
 
 entity_world_init :: (world: *EntityWorld) {
@@ -349,6 +360,19 @@ create_dead_martyr :: (pos_x: s16, pos_y: s16) {
   entity_world_add(*world, dead_martyr);
 }
 
+create_override_character :: (pos_x: s16, pos_y: s16, override_type: CharacterType) {
+  override: Entity;
+  override.kind = .OVERRIDE_CHARACTER;
+
+  override.pos = xy(pos_x, pos_y);
+  override.color = PLAYER_COLOR;
+  override.alpha_modifier = 0.25;
+  override.character_type = override_type;
+  override.glyph = CHARACTER_GLYPHS[override_type];
+
+  entity_world_add(*world, override);
+}
+
 create_kill_tile :: (pos_x: s16, pos_y: s16) {
   kill_tile: Entity;
   kill_tile.kind = .KILL_TILE;
@@ -422,6 +446,16 @@ create_player :: () {
     set(*command, PlayerMove.{ player.pos, xy(x, y), player });
     entity_world_push_command(*world, command);
 
+    // Check if we stepped onto a override, if so set it
+    maybe_override := find_entity_at(player.pos);
+    for world.entity_groups[Entity_Kind.OVERRIDE_CHARACTER] {
+      if it.pos == player.pos {
+        player.override_character = true;
+        player.override_character_type = it.character_type;
+        player.swiping_dir = xy(0, 0);
+      }
+    }
+
     player.pos = xy(x, y);
   }
 
@@ -459,19 +493,26 @@ create_player :: () {
         door.door_open = true;
       }
     }
-    if player.character_type == .CRAZY && kind == .PIT {
-      // We can move directly over the pit to the other side of it here!
-
-      return true;
+    
+    if player.character_type == .CRAZY {
+      // Check if any neighbour is a KILL_TILE, if so walk into it
+      for directions {
+        maybe_kill_tile := find_entity_at(xy(player.pos.x + it.x, player.pos.y + it.y));
+        if maybe_kill_tile != null && maybe_kill_tile.kind == .KILL_TILE {
+          command: Command;
+          set(*command, PlayerDied.{});
+          entity_world_push_command(*world, command); 
+          return false;
+        }
+      }
+      if kind == .PIT {
+        // We can move directly over the pit to the other side of it here!
+        set_player_pos(player, new_pos.x + dx, new_pos.y + dy);
+        return true;
+      }
     }
     if (!game_state.edit_mode && !walkable) || !is_valid(new_pos) || kind == .ENEMY then return false;
 
-    if player.character_type == .CRAZY {
-      // Dice roll for crazy walk
-      if random_get() % 100 > 50 { // 50/50 might be crazy
-
-      }
-    }
     set_player_pos(player, new_pos.x, new_pos.y);
 
     if player.character_type == .SWIPER && is_zero(player.swiping_dir) {
@@ -483,6 +524,10 @@ create_player :: () {
   }
  
   update_player :: (player: *Entity, dt: float) {
+    player.character_type = game_state.loop[game_state.current_loop_idx];
+    if player.override_character {
+      player.character_type = player.override_character_type;
+    }
     player.glyph = CHARACTER_GLYPHS[player.character_type];
 
     SWIPE_MOVE_FREQ :: 0.1; // Seconds
@@ -493,7 +538,7 @@ create_player :: () {
         finished := !move_player(player, player.swiping_dir.x, player.swiping_dir.y);
         if finished {
           player.swiping_dir = xy(0, 0);
-        }
+        }   
       }
     }else {
       if rl.IsKeyPressed(.KEY_D) move_player(player, 1, 0);
@@ -510,20 +555,29 @@ create_player :: () {
       return null;
     }
 
+    if rl.IsKeyPressed(.KEY_R) {
+      cmd: Command;
+      set(*cmd, PlayerDied.{});
+      entity_world_push_command(*world, cmd);
+    }
+
     // Process death
     for world.commands {
       if isa(it, PlayerDied) {
+        game_state.current_loop_idx = (game_state.current_loop_idx+1) % game_state.loop.count;
+        game_state.iterations += 1;
         set_player_pos(player, 1, 1);
       }
     }
 
-    // TODO: UTILITY STUFF SHOULD NOT BE IN RELEASE BUILD
+#if !RELEASE_BUILD {
     if rl.IsKeyPressed(.KEY_C) {
       create_wall(xy(player.pos.x, player.pos.y)); // Give birth, right here, right now
     }
     if rl.IsKeyPressed(.KEY_TAB) then game_state.edit_mode = !game_state.edit_mode;
     if rl.IsKeyPressed(.KEY_P) then print_level();
     if rl.IsKeyPressed(.KEY_SPACE) then player.character_type = (player.character_type + 1) % CHARACTER_GLYPHS.count;
+}
   }
 
   render_player :: (player: *Entity) {
@@ -611,7 +665,6 @@ find_entity_at :: (pos: SVector) -> *Entity {
   return null;
 }
 
-/*
 edit_system :: (dt: float) {
   if !game_state.edit_mode then return;
 
@@ -711,10 +764,13 @@ edit_system :: (dt: float) {
         create_enemy(game_state.selected_point);
         game_state.selected_point.x = -1;
       }
+      if rl.GuiButton(rl.Rectangle.{10+80*6, height-50, 80, 30}, "OVERRIDE") {
+        create_override_character(game_state.selected_point.x, game_state.selected_point.y, CharacterType.TINKERER);
+        game_state.selected_point.x = -1;
+      }
     }
   }
 }
-*/
 
 glyph_basic_render_system :: () {
   for *world.entities {
@@ -727,7 +783,6 @@ glyph_basic_render_system :: () {
       if game_state.edit_mode {
         cell.fg.a = 255;
       }
-
       
       cell.glyph = it.glyph;
     }
@@ -735,7 +790,7 @@ glyph_basic_render_system :: () {
 }
 
 is_basic_rendered :: (kind: Entity_Kind) -> bool {
-  return kind == .WALL || kind == .ENEMY || kind == .KILL_TILE || kind == .DOOR || kind == .LEVER || kind == .PIT || kind == .DEAD_MARTYR;
+  return kind == .WALL || kind == .ENEMY || kind == .KILL_TILE || kind == .DOOR || kind == .LEVER || kind == .PIT || kind == .DEAD_MARTYR || kind == .OVERRIDE_CHARACTER;
 }
 
 glyph_basic_update_system :: (dt: float) {
@@ -761,6 +816,75 @@ glyph_basic_update_system :: (dt: float) {
   }
 }
 
+render_ui_system :: () {
+  draw_string :: (start_x: s16, y: s16, str: string) {
+    x := start_x;
+    for i : 0..str.count-1 {
+      c := str[i];
+      cell := *buffer[x][y];
+      cell.glyph = c;
+      cell.fg = rl.WHITE;
+      x += 1;
+    }
+  }
+
+  y := UI_START_Y;
+  glyph := 126;
+  for x: 0..COLS-1 {
+    cell := *buffer[x][y];
+    cell.glyph = glyph;
+    cell.fg = rl.WHITE;
+  }
+
+  for x: 0..COLS-1 {
+    for y: UI_START_Y..ROWS-1 {
+      cell := *buffer[x][y];
+      cell.bg = rl.WHITE;
+      cell.bg.a = 10;
+    }
+  }
+
+  CYCLE_START_X :: 3;
+  CYCLE_Y :: UI_START_Y + 3;
+  
+  // Draw the indicator
+  cell := *buffer[CYCLE_START_X][CYCLE_Y+1];
+  cell.glyph = 94;
+  cell.fg = rl.WHITE;
+
+  // Draw the current character
+  player := world.entity_groups[Entity_Kind.PLAYER][0];
+  if player.override_character {
+    cell = *buffer[CYCLE_START_X][CYCLE_Y];
+    cell.glyph = player.glyph;
+    cell.fg = PLAYER_COLOR;  
+    // Draw the overriden character above
+    cell = *buffer[CYCLE_START_X][CYCLE_Y-1];
+    cell.glyph = CHARACTER_GLYPHS[game_state.loop[game_state.current_loop_idx]];
+    cell.fg = PLAYER_COLOR;        
+    cell.fg.a = 100;
+  }else {
+    cell = *buffer[CYCLE_START_X][CYCLE_Y];
+    cell.glyph = CHARACTER_GLYPHS[game_state.loop[game_state.current_loop_idx]];
+    cell.fg = PLAYER_COLOR;
+  }
+
+  // Draw next indicator
+  cell = *buffer[CYCLE_START_X+1][CYCLE_Y];
+  cell.glyph = 62;
+  cell.fg = rl.WHITE;
+
+  // Draw the upcoming character
+  cell = *buffer[CYCLE_START_X+2][CYCLE_Y];
+  next := (game_state.current_loop_idx+1) % game_state.loop.count;
+  cell.glyph = CHARACTER_GLYPHS[game_state.loop[next]];
+  cell.fg = PLAYER_COLOR;     
+
+  draw_string(CYCLE_START_X, CYCLE_Y-2, "R=next");
+  iterations_str := tprint("loops=%", game_state.iterations);
+  draw_string(CYCLE_START_X, CYCLE_Y+1, iterations_str);
+}
+
 main :: () {
   rl.InitWindow(COLS * tile_w, ROWS * tile_h, "JaiJam - Loop Gang");
   rl.SetTargetFPS(60);
@@ -770,6 +894,7 @@ main :: () {
   array_add(*world.update_systems, kill_tile_system);
   array_add(*world.update_systems, glyph_basic_update_system);
   array_add(*world.render_systems, glyph_basic_render_system);
+  array_add(*world.render_systems, render_ui_system);
 
   // Fill up the world
   create_player();
@@ -777,13 +902,19 @@ main :: () {
 
   entity_world_rebuild(*world);
 
+  // Init the loop variable with a bunch of character states...
+  array_add(*game_state.loop, CharacterType.TINKERER);
+  array_add(*game_state.loop, CharacterType.MARTYR);
+  array_add(*game_state.loop, CharacterType.MARTYR);
+  array_add(*game_state.loop, CharacterType.CRAZY);
+
   // Push initial move command so every glyph gets correctly lit up
   command: Command;
   player := world.entity_groups[Entity_Kind.PLAYER][0];
   set(*command, PlayerMove.{ player.pos, player.pos, player });
   entity_world_push_command(*world, command);
 
-  // rl.GuiSetStyle(0, rl.GuiDefaultProperty.TEXT_SIZE.(s32), 20);
+  rl.GuiSetStyle(0, rl.GuiDefaultProperty.TEXT_SIZE.(s32), 20);
 
   while !rl.WindowShouldClose() {
     memory_visualizer_per_frame_update();
@@ -810,7 +941,7 @@ main :: () {
         }
       }
 
-      // edit_system(rl.GetFrameTime());
+      edit_system(rl.GetFrameTime());
 
     rl.EndDrawing();
   }
