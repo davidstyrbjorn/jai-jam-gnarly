@@ -578,6 +578,9 @@ print_level :: () {
   for world.entity_groups[Entity_Kind.WALL] {
     append(*builder, tprint("create_wall(xy(%, %));\n", it.pos.x, it.pos.y));
   }
+  for world.entity_groups[Entity_Kind.DIGGABLE] {
+    append(*builder, tprint("create_wall(xy(%, %), true);\n", it.pos.x, it.pos.y));
+  }
   for world.entity_groups[Entity_Kind.KILL_TILE] {
     append(*builder, tprint("create_kill_tile(%, %);\n", it.pos.x, it.pos.y));
   }
@@ -667,6 +670,11 @@ edit_system :: (dt: float) {
 
   if game_state.connecting_to_door {
     rl.GuiLabel(rl.Rectangle.{0, 50, 100, 50} , "CONNECTING DOOR!");
+  }
+
+  if rl.IsKeyPressed(.KEY_DELETE) {
+    e := find_entity_at(game_state.selected_point);
+    entity_world_remove(*world, e.id);
   }
 
   if rl.IsKeyDown(.KEY_LEFT_ALT) {
