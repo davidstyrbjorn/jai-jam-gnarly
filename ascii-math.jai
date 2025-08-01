@@ -17,6 +17,15 @@ Node :: struct {
 
 FIRE_GLYPHS :: int.[126, 42, 46];
 
+LEVEL_COMPLETE_STRINGS :: string.[
+  "LEVEL COMPLETE",
+  "GO AGAIN...",
+  "GREAT JOB",
+  "STUCK FOREVER",
+  "ONE MORE LOOP",
+  "LOOP",
+];
+
 Cell :: struct {
   glyph: int;
   fg, bg: rl.Color; 

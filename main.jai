@@ -22,6 +22,13 @@ FIRE_COLOR_2 :: rl.Color.{ 255,154,0,50 };
 CYCLE_START_X :: 3;
 CYCLE_Y :: UI_START_Y + 3;
 
+State :: enum {
+  TRANSITION;
+  PLAYING;
+  PICKING_LOOP;
+  MENU;
+}
+
 GameState :: struct {
   // Used for editing
   edit_mode: bool = false;
@@ -41,14 +48,11 @@ GameState :: struct {
   shake_intensity: float = 0.0;
   transition_t: float = 0.0;
   transition_origin: Vector2;
+  spawn_level_flag: bool = false;
 
   transition_out: bool;
 
-  state : enum {
-    TRANSITION;
-    PLAYING;
-    PICKING_LOOP;
-  } = .PLAYING;
+  state: State = .MENU;
 }
 game_state: GameState;
 world: EntityWorld;
@@ -622,6 +626,9 @@ create_player :: () {
   render_player :: (player: *Entity) {
     player_cell := *buffer[player.pos.x][player.pos.y];
     player_cell.fg = PLAYER_COLOR;
+    if game_state.state != .PLAYING {
+      player_cell.fg.a = 0;
+    }
     player_cell.glyph = player.glyph;
   }
 
@@ -935,7 +942,6 @@ render_ui_system :: () {
       x += 1;
     }
   }
-
   y := UI_START_Y;
   glyph := 126;
   for x: 0..COLS-1 {
@@ -951,24 +957,28 @@ render_ui_system :: () {
       cell.bg.a = 10;
     }
   }
+  if game_state.state == .PLAYING {
+    // Draw the indicator on the current loop character
+    cell := *buffer[CYCLE_START_X + game_state.current_loop_idx][CYCLE_Y+1];
+    cell.glyph = 94;
+    cell.fg = rl.WHITE;
 
+    // Draw the current character
+    for 0..3 {
+      cell = *buffer[CYCLE_START_X+it][CYCLE_Y];
+      cell.glyph = CHARACTER_GLYPHS[game_state.loop[it]].(int);
+      cell.fg = PLAYER_COLOR;
+    }
 
-  
-  // Draw the indicator on the current loop character
-  cell := *buffer[CYCLE_START_X + game_state.current_loop_idx][CYCLE_Y+1];
-  cell.glyph = 94;
-  cell.fg = rl.WHITE;
-
-  // Draw the current character
-  for 0..3 {
-    cell = *buffer[CYCLE_START_X+it][CYCLE_Y];
-    cell.glyph = CHARACTER_GLYPHS[game_state.loop[it]].(int);
-    cell.fg = PLAYER_COLOR;
+    draw_string(CYCLE_START_X, CYCLE_Y-2, "R=next");
+    iterations_str := tprint("loops=%", game_state.iterations);
+    draw_string(CYCLE_START_X, CYCLE_Y+2, iterations_str);
   }
-
-  draw_string(CYCLE_START_X, CYCLE_Y-2, "R=next");
-  iterations_str := tprint("loops=%", game_state.iterations);
-  draw_string(CYCLE_START_X, CYCLE_Y+2, iterations_str);
+  else if game_state.state == .MENU {
+    prompt := "PRESS SPACE";
+    x := (COLS/2)-prompt.count/2-1;
+    draw_string(x.(s16), 10, "PRESS SPACE");
+  }
 }
 
 level_completed :: (from_pos: SVector) {
@@ -976,6 +986,7 @@ level_completed :: (from_pos: SVector) {
   game_state.transition_t = 0.0;
   game_state.transition_origin = xy(from_pos.x.(float), from_pos.y.(float));
   game_state.transition_out = true;
+  game_state.spawn_level_flag = false;
   for y : 0..ROWS-1 {
     for x : 0..COLS-1 {
       cell := *buffer[x][y];
@@ -1000,6 +1011,20 @@ transition_system :: (dt: float) {
     command: Command;
     set(*command, PlayerMove.{ player.pos, player.pos, player });
     entity_world_push_command(*world, command);
+    
+    if game_state.spawn_level_flag {
+      create_level();
+    }
+  }
+  if !game_state.transition_out && game_state.transition_t < 0.0 {
+    game_state.state = .PLAYING;
+    for y : 0..ROWS-1 {
+      for x : 0..COLS-1 {
+        cell := *buffer[x][y];
+        cell.override_flag = false;
+        cell.prev_override_flag = false;
+      }
+    }
   }
 }
 
@@ -1047,6 +1072,28 @@ transition_render_system :: () {
   }
 }
 
+// System that runs only in the menu
+// Should allow the player to press start which begins the game
+menu_system :: (dt: float) {
+  if game_state.state != .MENU then return;
+  
+  if rl.IsKeyPressed(.KEY_SPACE) {
+    // Initalise a transition
+    game_state.state = .TRANSITION;
+    game_state.transition_t = 0.0;
+    game_state.transition_origin = xy(COLS/2.0, ROWS/2.0);
+    game_state.transition_out = true;
+    game_state.spawn_level_flag = true;
+    for y : 0..ROWS-1 {
+      for x : 0..COLS-1 {
+        cell := *buffer[x][y];
+        cell.override_flag = false;
+        cell.prev_override_flag = false;
+      }
+    }
+  }
+}
+
 main :: () {
   rl.InitWindow(COLS * tile_w, ROWS * tile_h, "JaiJam - Loop Gang");
   rl.SetTargetFPS(60);
@@ -1057,13 +1104,14 @@ main :: () {
   array_add(*world.update_systems, glyph_basic_update_system);
   array_add(*world.render_systems, glyph_basic_render_system);
   array_add(*world.render_systems, render_ui_system);
+  array_add(*world.update_systems, menu_system);
 
   array_add(*world.update_systems, transition_system);
   array_add(*world.render_systems, transition_render_system);
 
   // Fill up the world
   create_player();
-  create_level();
+  // create_level();
 
   entity_world_rebuild(*world);
 
@@ -1158,7 +1206,6 @@ main :: () {
 #import "Tagged_Union";
 Table :: #import "Hash_Table";
 rl :: #import "raylib";
-#import "Sloppy_Math";
 
 #load "levels.jai";
 #load "ascii-math.jai";
