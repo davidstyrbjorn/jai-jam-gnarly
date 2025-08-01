@@ -30,6 +30,8 @@ Cell :: struct {
   glyph: int;
   fg, bg: rl.Color; 
 
+  shake: bool = false;
+
   value: float = 0.0;
   override_flag: bool;
   prev_override_flag: bool;
