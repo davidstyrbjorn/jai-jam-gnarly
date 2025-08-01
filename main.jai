@@ -34,10 +34,12 @@ GameState :: struct {
   current_loop_idx: int = 0;
   iterations: int = 0;
 
-
   player_light_strength: float = NORMAL_PLAYER_LIGHT_STR;
   prev_light_strength: s16;
   curr_light_strength: s16;
+
+  shake_duration: float = 0.0;
+  shake_intensity: float = 0.0;
 }
 game_state: GameState;
 world: EntityWorld;
@@ -516,6 +518,18 @@ create_player :: () {
 
     return true;
   }
+
+  is_explodeable :: (entity: *Entity) -> bool {
+    return entity.kind == .ENEMY; // TODO:
+  }
+
+  martyr_explode :: () {
+    for x: -1..1 {
+      for y: -1..1 {
+        // TODO: Remove explodable tiles
+      }
+    }
+  }
  
   update_player :: (player: *Entity, dt: float) {
     player.character_type = game_state.loop[game_state.current_loop_idx];
@@ -539,6 +553,10 @@ create_player :: () {
 
       if rl.IsKeyPressed(.KEY_SPACE) && player.character_type == .TINKERER {
         create_wall(player.pos);
+      }
+
+      if rl.IsKeyPressed(.KEY_SPACE) && player.character_type == .MARTYR {
+        martyr_explode();
       }
     }
 
@@ -583,6 +601,7 @@ create_player :: () {
     }
     if rl.IsKeyPressed(.KEY_TAB) then game_state.edit_mode = !game_state.edit_mode;
     if rl.IsKeyPressed(.KEY_P) then print_level();
+    if rl.IsKeyPressed(.KEY_X) then trigger_screen_shake(5, 1);
 }
   }
 
@@ -611,6 +630,11 @@ connect_lever_to_door :: (lever_pos: SVector, door_pos: SVector) {
   assert(door != null && door.kind == .DOOR);
 
   array_add(*lever.door_connections, door_pos);
+}
+
+trigger_screen_shake :: (intensity: float, duration: float) {
+  game_state.shake_intensity = intensity;
+  game_state.shake_duration = duration;
 }
 
 print_level :: () {
@@ -965,10 +989,23 @@ main :: () {
     memory_visualizer_per_frame_update();
 
     reset_temporary_storage();
-    entity_world_update(*world, rl.GetFrameTime());
+
+    dt := rl.GetFrameTime();
+    entity_world_update(*world, dt);
 
     clear_buffer();
     entity_world_render(*world);
+
+    shake_offset := Vector2.{ 0, 0 };
+    if game_state.shake_duration > 0 {
+      game_state.shake_duration -= dt;
+      
+      // Convert [0, 1] to [-1, 1] and multiple by intensity
+      shake_offset.x = ((random_get_zero_to_one() * 2.0) - 1.0) * game_state.shake_intensity;
+      shake_offset.y = ((random_get_zero_to_one() * 2.0) - 1.0) * game_state.shake_intensity;
+
+      if game_state.shake_duration <= 0 then game_state.shake_duration = 0;
+    }
 
     rl.BeginDrawing();
       rl.ClearBackground(rl.BLACK);
@@ -976,22 +1013,32 @@ main :: () {
       for y : 0..ROWS-1 {
         for x : 0..COLS-1 {
           cell := buffer[x][y];
-          rl.DrawRectangle(x*tile_w, y*tile_h, tile_w, tile_h, cell.bg);
+
+          local_offset := shake_offset;
+          if y >= UI_START_Y then local_offset = xy(0.0, 0.0);
+              
+          // We now apply screen shake here
+          rect_x := (x * tile_w) + local_offset.x.(s16);
+          rect_y := (y * tile_h) + local_offset.y.(s16);
+          rl.DrawRectangle(rect_x, rect_y, tile_w, tile_h, cell.bg);
 
           // Draw the glyph
           glyph_index := rl.GetGlyphIndex(font, cell.glyph.(s32));
           rec := font.recs[glyph_index];
           
-          // Calculate the centered position for the glyph inside the tile
           pos_x := (x * tile_w) + (tile_w - rec.width)  / 2;
           pos_y := (y * tile_h) + (tile_h - rec.height) / 2;
-          pos := xy(pos_x.(float), pos_y.(float));
+          
+          // We now apply screen shake here
+          final_pos_x := pos_x.(float) + local_offset.x;
+          final_pos_y := pos_y.(float) + local_offset.y;
+          pos := Vector2.{ final_pos_x, final_pos_y };
           
           rl.DrawTextureRec(font.texture, rec, pos, cell.fg);
         }
       }
 
-      edit_system(rl.GetFrameTime());
+      edit_system(dt);
 
     rl.EndDrawing();
   }
