@@ -14,7 +14,7 @@ tile_h: s16 = 20;
 
 PLAYER_COLOR :: rl.Color.{ 255, 0, 255, 255 };
 GOAL_COLOR :: rl.Color.{ 255, 215, 0, 255 };
-NORMAL_PLAYER_LIGHT_STR :: 9.0;
+NORMAL_PLAYER_LIGHT_STR :: 12.0;
 ENHANCED_PLAYER_LIGHT_STR :: COLS.(float);
 
 STANDING_ON_WALL_BG :: rl.Color.{ 100, 100, 100, 100 };
@@ -70,6 +70,10 @@ SVector :: struct {
 
 operator == :: (left: SVector, right: SVector) -> bool {
   return left.x == right.x && left.y == right.y;
+}
+
+operator + :: (left: SVector, right: SVector) -> SVector {
+  return sxy(left.x + right.x, left.y + right.y);
 }
 
 is_zero :: (s: SVector) -> bool {
@@ -153,6 +157,8 @@ Entity :: struct {
   character_type: CharacterType;
   swiping_dir: SVector;
   swipe_counter: float;
+
+  action_prepped: bool = false;
 
   fire_t: float;
 }
@@ -527,6 +533,17 @@ open_closest_door :: (from: SVector) {
   }
 }
 
+tinkerer_place_wall :: (at: SVector) {
+  e := find_entity_at(at);
+  if e {
+    // Check if e is a type of tile we are allowed to place blocks on?
+    // TODO: Ask ALI
+    return;
+  }
+
+  create_wall(at);
+}
+
 create_player :: () {
   set_player_pos :: (player: *Entity, x: s16, y: s16) {
     command: Command;
@@ -537,8 +554,8 @@ create_player :: () {
   }
 
   // Return true or false depending on if we successfully moved or not
-  move_player :: (player: *Entity, dx: s16, dy: s16) -> bool {
-    new_pos := xy(player.pos.x + dx, player.pos.y + dy);
+  move_player :: (player: *Entity, delta: SVector) -> bool {
+    new_pos := xy(player.pos.x + delta.x, player.pos.y + delta.y);
     // Check for wall
     walkable, kind := is_walkable(new_pos);
     if kind == .KILL_TILE {
@@ -579,7 +596,7 @@ create_player :: () {
     set_player_pos(player, new_pos.x, new_pos.y);
 
     if player.character_type == .SWIPER && is_zero(player.swiping_dir) {
-      player.swiping_dir = xy(dx, dy);
+      player.swiping_dir = delta;
       player.swipe_counter = 0;
     }
 
@@ -650,26 +667,39 @@ create_player :: () {
         game_state.editing_loop_index = clamp(game_state.editing_loop_index, 0, 3);
       }
     }
-    if game_state.state == .PLAYING {
+    else if game_state.state == .PLAYING {
       SWIPE_MOVE_FREQ :: 0.1; // Seconds
       if player.character_type == .SWIPER && !is_zero(player.swiping_dir) {
         player.swipe_counter += dt;
         if player.swipe_counter > SWIPE_MOVE_FREQ {
           player.swipe_counter = 0;
-          finished := !move_player(player, player.swiping_dir.x, player.swiping_dir.y);
+          finished := !move_player(player,player.swiping_dir);
           if finished {
             player.swiping_dir = xy(0, 0);
           }   
         }
       }else {
-        if rl.IsKeyPressed(.KEY_D) move_player(player, 1, 0);
-        if rl.IsKeyPressed(.KEY_A) move_player(player, -1, 0);
-        if rl.IsKeyPressed(.KEY_S) move_player(player, 0, 1);
-        if rl.IsKeyPressed(.KEY_W) move_player(player, 0, -1);
+        input := sxy(0, 0);
+        if rl.IsKeyPressed(.KEY_D) input = xy(1, 0);
+        if rl.IsKeyPressed(.KEY_A) input = xy(-1, 0);
+        if rl.IsKeyPressed(.KEY_S) input = xy(0, 1);
+        if rl.IsKeyPressed(.KEY_W) input = xy(0, -1);
+        if !is_zero(input) {
+          if player.character_type == .TINKERER && player.action_prepped {
+            tinkerer_place_wall(player.pos + input);
+            player.action_prepped = false;
+          }else {
+            move_player(player, input);
+          }
+        }
 
         if rl.IsKeyPressed(.KEY_SPACE) && player.character_type == .TINKERER {
-          create_wall(player.pos);
+          player.action_prepped = true;
         }
+
+        // Shake baby
+        cell := *buffer[player.pos.x][player.pos.y];
+        cell.shake = player.action_prepped;
 
         if rl.IsKeyPressed(.KEY_SPACE) && player.character_type == .MARTYR {
           martyr_explode();
@@ -698,6 +728,7 @@ create_player :: () {
       for world.commands {
         if isa(it, PlayerDied) {
           game_state.current_loop_idx = (game_state.current_loop_idx+1) % game_state.loop.count;
+          player.action_prepped = false;
           game_state.iterations += 1;
           trigger_screen_shake(2, 0.5);
           set_player_pos(player, 1, 1);
@@ -1238,10 +1269,10 @@ main :: () {
   entity_world_rebuild(*world);
 
   // Init the loop variable with a bunch of character states...
-  game_state.loop[0] = CharacterType.DIGGER;
-  game_state.loop[1] = CharacterType.MARTYR;
+  game_state.loop[0] = CharacterType.SWIPER;
+  game_state.loop[1] = CharacterType.TINKERER;
   game_state.loop[2] = CharacterType.MARTYR;
-  game_state.loop[3] = CharacterType.SWIPER;
+  game_state.loop[3] = CharacterType.DIGGER;
 
   // Push initial move command so every glyph gets correctly lit up
   command: Command;
@@ -1291,7 +1322,14 @@ main :: () {
             glyph = cell.override_glyph;
           }
 
-          local_offset := shake_offset;
+          INDIVIDUAL_SHAKE_INTENSITY :: 2;
+          individual_shake_offset := Vector2.{ 0, 0 };
+          if cell.shake {
+            individual_shake_offset.x = ((random_get_zero_to_one() * 2.0) - 1.0) * INDIVIDUAL_SHAKE_INTENSITY;
+            individual_shake_offset.y = ((random_get_zero_to_one() * 2.0) - 1.0) * INDIVIDUAL_SHAKE_INTENSITY;
+          } 
+
+          local_offset := shake_offset + individual_shake_offset;
           if y >= UI_START_Y then local_offset = xy(0.0, 0.0);
               
           // We now apply screen shake here
