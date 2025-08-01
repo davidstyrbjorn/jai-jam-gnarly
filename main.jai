@@ -1,13 +1,16 @@
 
 RELEASE_BUILD :: false;
 
-UI_START_Y :: 41 - 6;
+GAME_AREA_SIZE :: (2 * SEGMENT_SIZE); // 43
+UI_HEIGHT :: 7;
 
-COLS: s16 : 40;
-ROWS: s16 : 41;
+COLS: s16 : GAME_AREA_SIZE; // 43, for a square playable area
+ROWS: s16 : GAME_AREA_SIZE + UI_HEIGHT; // 50, total window height in tiles
 
-tile_w: s16 = 24;
-tile_h: s16 = 24;
+UI_START_Y :: GAME_AREA_SIZE; // 43, UI starts right after the game area
+
+tile_w: s16 = 20;
+tile_h: s16 = 20;
 
 PLAYER_COLOR :: rl.Color.{ 255, 0, 255, 255 };
 GOAL_COLOR :: rl.Color.{ 255, 215, 0, 255 };
@@ -76,6 +79,8 @@ CharacterType :: enum {
   TINKERER :: 1;
   MARTYR :: 2;
   DIGGER :: 3;
+  // ALCHEMIST - randomly change type of tile
+  // WIZARD - ranged based attack & also controls levers
 }
 
 /// --- BEGIN ENTITY 
@@ -147,15 +152,15 @@ Entity :: struct {
 NUM_ENTITY_KIND :: 10;
 Entity_Kind :: enum u32 {
   PLAYER;
-  ENEMY;
-  WALL;
-  DOOR;
-  LEVER;
-  KILL_TILE;
-  FIRE;
+  ENEMY; 
+  WALL; 
+  DOOR; 
+  LEVER; 
+  KILL_TILE; 
+  FIRE; 
   DEAD_MARTYR;
-  DIGGABLE;
-  GOAL;
+  DIGGABLE; 
+  GOAL; 
 }
 
 entity_world_init :: (world: *EntityWorld) {
@@ -257,6 +262,10 @@ xy :: inline (x: s16, y: s16) -> SVector {
   return SVector.{x, y};
 }
 
+sxy :: (x: s16, y: s16) -> SVector {
+  return SVector.{x, y};
+}
+
 heuristic :: (p1: SVector, p2: SVector) -> s16 {
   return (abs(p1.x - p2.x) + abs(p1.y - p2.y)).(s16);
 }
@@ -325,7 +334,7 @@ create_goal :: (pos: SVector) {
   entity_world_add(*world, goal);
 }
 
-create_wall :: (pos: SVector, is_diggable := false) {
+create_wall :: (pos: SVector) {
   wall: Entity;
 
   wall.kind = .WALL;
@@ -334,12 +343,18 @@ create_wall :: (pos: SVector, is_diggable := false) {
   wall.color = color(100, 100, 100, 255);
   wall.glyph = 35;
 
-  if is_diggable {
-    wall.color = color(79, 58, 43, 255);
-    wall.kind = .DIGGABLE;      
-  }
-
   entity_world_add(*world, wall);
+}
+
+create_diggable :: (pos: SVector) {
+  diggable: Entity;
+
+  diggable.pos = pos;
+  diggable.color = color(79, 58, 43, 255);
+  diggable.kind = .DIGGABLE;    
+  diggable.glyph = 35;
+
+  entity_world_add(*world, diggable);
 }
 
 create_lever :: (pos: SVector) {
@@ -373,11 +388,11 @@ create_door :: (pos: SVector) {
   entity_world_add(*world, door);
 }
 
-create_dead_martyr :: (pos_x: s16, pos_y: s16) {
+create_dead_martyr :: (pos: SVector) {
   dead_martyr: Entity;
   dead_martyr.kind = .DEAD_MARTYR;
 
-  dead_martyr.pos = xy(pos_x, pos_y);
+  dead_martyr.pos = pos;
   dead_martyr.color = PLAYER_COLOR;
   dead_martyr.alpha_modifier = 0.25;
   dead_martyr.glyph = GLYPH.MARTYR.(int);
@@ -385,11 +400,11 @@ create_dead_martyr :: (pos_x: s16, pos_y: s16) {
   entity_world_add(*world, dead_martyr);
 }
 
-create_kill_tile :: (pos_x: s16, pos_y: s16) {
+create_kill_tile :: (pos: SVector) {
   kill_tile: Entity;
   kill_tile.kind = .KILL_TILE;
 
-  kill_tile.pos = xy(pos_x, pos_y);
+  kill_tile.pos = pos;
   kill_tile.color = color_random();
   kill_tile.glyph = cast(int)(32 + random_get() % (126-32));
 
@@ -499,7 +514,7 @@ create_player :: () {
       // Mechanic "Martyrs can cover up KILL TILES"
       if player.character_type == .MARTYR  {
         entity_world_remove(*world, find_entity_at(new_pos).id);
-        create_dead_martyr(new_pos.x, new_pos.y);
+        create_dead_martyr(new_pos);
       }
 
       command: Command;
@@ -560,67 +575,72 @@ create_player :: () {
     player.character_type = game_state.loop[game_state.current_loop_idx];
     player.glyph = CHARACTER_GLYPHS[player.character_type].(int);
 
-    SWIPE_MOVE_FREQ :: 0.1; // Seconds
-    if player.character_type == .SWIPER && !is_zero(player.swiping_dir) {
-      player.swipe_counter += dt;
-      if player.swipe_counter > SWIPE_MOVE_FREQ {
-        player.swipe_counter = 0;
-        finished := !move_player(player, player.swiping_dir.x, player.swiping_dir.y);
-        if finished {
-          player.swiping_dir = xy(0, 0);
-        }   
+    if game_state.state == .PICKING_LOOP {
+
+    }
+    if game_state.state == .PLAYING {
+      SWIPE_MOVE_FREQ :: 0.1; // Seconds
+      if player.character_type == .SWIPER && !is_zero(player.swiping_dir) {
+        player.swipe_counter += dt;
+        if player.swipe_counter > SWIPE_MOVE_FREQ {
+          player.swipe_counter = 0;
+          finished := !move_player(player, player.swiping_dir.x, player.swiping_dir.y);
+          if finished {
+            player.swiping_dir = xy(0, 0);
+          }   
+        }
+      }else {
+        if rl.IsKeyPressed(.KEY_D) move_player(player, 1, 0);
+        if rl.IsKeyPressed(.KEY_A) move_player(player, -1, 0);
+        if rl.IsKeyPressed(.KEY_S) move_player(player, 0, 1);
+        if rl.IsKeyPressed(.KEY_W) move_player(player, 0, -1);
+
+        if rl.IsKeyPressed(.KEY_SPACE) && player.character_type == .TINKERER {
+          create_wall(player.pos);
+        }
+
+        if rl.IsKeyPressed(.KEY_SPACE) && player.character_type == .MARTYR {
+          martyr_explode();
+        }
       }
-    }else {
-      if rl.IsKeyPressed(.KEY_D) move_player(player, 1, 0);
-      if rl.IsKeyPressed(.KEY_A) move_player(player, -1, 0);
-      if rl.IsKeyPressed(.KEY_S) move_player(player, 0, 1);
-      if rl.IsKeyPressed(.KEY_W) move_player(player, 0, -1);
 
-      if rl.IsKeyPressed(.KEY_SPACE) && player.character_type == .TINKERER {
-        create_wall(player.pos);
+      if rl.IsKeyPressed(.KEY_R) {
+        cmd: Command;
+        set(*cmd, PlayerDied.{});
+        entity_world_push_command(*world, cmd);
       }
 
-      if rl.IsKeyPressed(.KEY_SPACE) && player.character_type == .MARTYR {
-        martyr_explode();
+      // Are we currently standing on a mod station tile? 
+      // game_state.prev_light_strength = game_state.player_light_strength.(s16);
+      // desired_light_strength: float = ifx on_mod_station then ENHANCED_PLAYER_LIGHT_STR else NORMAL_PLAYER_LIGHT_STR;
+      // game_state.player_light_strength = lerp(game_state.player_light_strength, desired_light_strength, 1.0 * dt);
+      // game_state.curr_light_strength = game_state.player_light_strength.(s16);
+
+      if game_state.curr_light_strength != game_state.prev_light_strength {
+        cmd: Command;
+        set(*cmd, LightUpdate);
+        entity_world_push_command(*world, cmd);
       }
-    }
 
-    if rl.IsKeyPressed(.KEY_R) {
-      cmd: Command;
-      set(*cmd, PlayerDied.{});
-      entity_world_push_command(*world, cmd);
-    }
-
-    // Are we currently standing on a mod station tile? 
-    // game_state.prev_light_strength = game_state.player_light_strength.(s16);
-    // desired_light_strength: float = ifx on_mod_station then ENHANCED_PLAYER_LIGHT_STR else NORMAL_PLAYER_LIGHT_STR;
-    // game_state.player_light_strength = lerp(game_state.player_light_strength, desired_light_strength, 1.0 * dt);
-    // game_state.curr_light_strength = game_state.player_light_strength.(s16);
-
-    if game_state.curr_light_strength != game_state.prev_light_strength {
-      cmd: Command;
-      set(*cmd, LightUpdate);
-      entity_world_push_command(*world, cmd);
-    }
-
-    // Process death
-    for world.commands {
-      if isa(it, PlayerDied) {
-        game_state.current_loop_idx = (game_state.current_loop_idx+1) % game_state.loop.count;
-        game_state.iterations += 1;
-        set_player_pos(player, 1, 1);
+      // Process death
+      for world.commands {
+        if isa(it, PlayerDied) {
+          game_state.current_loop_idx = (game_state.current_loop_idx+1) % game_state.loop.count;
+          game_state.iterations += 1;
+          trigger_screen_shake(2, 0.5);
+          set_player_pos(player, 1, 1);
+        }
       }
-    }
 
-#if !RELEASE_BUILD {
-    if rl.IsKeyPressed(.KEY_C) {
-      create_wall(xy(player.pos.x, player.pos.y)); // Give birth, right here, right now
+  #if !RELEASE_BUILD {
+      if rl.IsKeyPressed(.KEY_C) {
+        create_wall(xy(player.pos.x, player.pos.y)); // Give birth, right here, right now
+      }
+      if rl.IsKeyPressed(.KEY_TAB) then game_state.edit_mode = !game_state.edit_mode;
+      // if rl.IsKeyPressed(.KEY_X) then trigger_screen_shake(5, 1);
+      if rl.IsKeyPressed(.KEY_X) then level_completed(player.pos);
+  }
     }
-    if rl.IsKeyPressed(.KEY_TAB) then game_state.edit_mode = !game_state.edit_mode;
-    if rl.IsKeyPressed(.KEY_P) then print_level();
-    // if rl.IsKeyPressed(.KEY_X) then trigger_screen_shake(5, 1);
-    if rl.IsKeyPressed(.KEY_X) then level_completed(player.pos);
-}
   }
 
   render_player :: (player: *Entity) {
@@ -658,39 +678,57 @@ trigger_screen_shake :: (intensity: float, duration: float) {
   game_state.shake_duration = duration;
 }
 
-print_level :: () {
-  builder: String_Builder;
-  init_string_builder(*builder);
-  for world.entity_groups[Entity_Kind.ENEMY] {
-    append(*builder, tprint("create_enemy(xy(%, %));\n", it.pos.x, it.pos.y));
-  }
-  for world.entity_groups[Entity_Kind.WALL] {
-    append(*builder, tprint("create_wall(xy(%, %));\n", it.pos.x, it.pos.y));
-  }
-  for world.entity_groups[Entity_Kind.DIGGABLE] {
-    append(*builder, tprint("create_wall(xy(%, %), true);\n", it.pos.x, it.pos.y));
-  }
-  for world.entity_groups[Entity_Kind.KILL_TILE] {
-    append(*builder, tprint("create_kill_tile(%, %);\n", it.pos.x, it.pos.y));
-  }
-  for world.entity_groups[Entity_Kind.DOOR] {
-    append(*builder, tprint("create_door(xy(%, %));\n", it.pos.x, it.pos.y));
-  }
-  for world.entity_groups[Entity_Kind.LEVER] {
-    append(*builder, tprint("create_lever(xy(%, %));\n", it.pos.x, it.pos.y));
-    for door_pos : it.door_connections {
-      append(*builder, tprint("connect_lever_to_door(xy(%, %), xy(%, %));\n", it.pos.x, it.pos.y, door_pos.x, door_pos.y));
+print_currently_selected_segment :: () {
+  // Print the currently selected segment as a string that can be copy pasted into a file
+  segment_offset: SVector = xy(0, 0);
+  sp := game_state.selected_point;
+  if sp.x < SEGMENT_SIZE && sp.y < SEGMENT_SIZE then segment_offset = xy(0, 0);
+  else if sp.x >= SEGMENT_SIZE && sp.y < SEGMENT_SIZE then segment_offset = xy(SEGMENT_SIZE, 0);
+  else if sp.x < SEGMENT_SIZE && sp.y >= SEGMENT_SIZE then segment_offset = xy(0, SEGMENT_SIZE);
+  else segment_offset = xy(SEGMENT_SIZE, SEGMENT_SIZE);
+  
+  print("BEGIN LEVEL");
+
+  for y: segment_offset.y..segment_offset.y+SEGMENT_SIZE-1 {
+    for x: segment_offset.x..segment_offset.x+SEGMENT_SIZE-1 {
+      e := find_entity_at(xy(x, y));
+      if e == null {
+        print("_");
+        continue;
+      }
+      if e.kind == {
+        case .ENEMY;
+          print("E");
+        case .WALL; 
+          print("#");
+        case .DOOR; 
+          print("D");
+        case .LEVER; 
+          print("L");
+        case .KILL_TILE;
+          print("K"); 
+        case .FIRE; 
+          print("F");
+        case .DIGGABLE;
+          print("d"); 
+        case .GOAL; 
+          print("G");
+      }
     }
+      print("\n");
   }
 
-  file_name := tprint("./level.in");
-  file, success := file_open(file_name, true);
-  assert(success, "Failed to open level file for writing!");
-  defer file_close(*file);
-  file_write(*file, *builder);
-
-  print("Saved level!\n");
+  print("END LEVEL");
 }
+
+  // file_name := tprint("./level.in");
+  // file, success := file_open(file_name, true);
+  // assert(success, "Failed to open level file for writing!");
+  // defer file_close(*file);
+  // file_write(*file, *builder);
+
+  // print("Saved level!\n");
+
 
 kill_tile_system :: (dt: float) {
   for world.entity_groups[Entity_Kind.KILL_TILE] {
@@ -765,6 +803,14 @@ edit_system :: (dt: float) {
     entity_world_remove(*world, e.id);
   }
 
+  if rl.IsKeyPressed(.KEY_P) {
+    if game_state.selected_point.x != -1 {
+      print_currently_selected_segment();
+    } else {
+      trigger_screen_shake(4, 1);
+    }
+  }
+
   if rl.IsKeyDown(.KEY_LEFT_ALT) {
     height := rl.GetScreenHeight().(float);
     if game_state.editing_loop_index != -1 {
@@ -801,12 +847,6 @@ edit_system :: (dt: float) {
         entity_world_remove(*world, e.id);
         return;
       }
-      if e.kind == .DOOR {
-        if rl.GuiButton(rl.Rectangle.{110, height-50, 100, 50}, "CLOPEN") {
-          e.door_open = !e.door_open;
-          return;
-        }
-      }
       if e.kind == .LEVER {
         if rl.GuiButton(rl.Rectangle.{110, height-50, 100, 50}, "CONNECT") {
           game_state.connecting_to_door = true;
@@ -836,7 +876,7 @@ edit_system :: (dt: float) {
         game_state.selected_point.x = -1;
       }
       if rl.GuiButton(rl.Rectangle.{100*3, height-50, 90, 30}, "KILL") {
-        create_kill_tile(game_state.selected_point.x, game_state.selected_point.y);
+        create_kill_tile(game_state.selected_point);
         game_state.selected_point.x = -1;
       }
       if rl.GuiButton(rl.Rectangle.{100*4, height-50, 90, 30}, "ENEMY") {
@@ -844,7 +884,7 @@ edit_system :: (dt: float) {
         game_state.selected_point.x = -1;
       }
       if rl.GuiButton(rl.Rectangle.{100*5, height-50, 90, 30}, "DIGGABLE") {
-        create_wall(game_state.selected_point, true);
+        create_diggable(game_state.selected_point);
         game_state.selected_point.x = -1;
       }
       if rl.GuiButton(rl.Rectangle.{100*6, height-50, 90, 30}, "FIRE") {
@@ -1095,6 +1135,9 @@ menu_system :: (dt: float) {
 }
 
 main :: () {
+  apollot_time := current_time_consensus();
+  random_seed(to_calendar(apollot_time).millisecond.(u64));
+
   rl.InitWindow(COLS * tile_w, ROWS * tile_h, "JaiJam - Loop Gang");
   rl.SetTargetFPS(60);
   font := rl.LoadFontEx("./CozetteCrossedSevenVector.ttf", tile_w, null, 0);
