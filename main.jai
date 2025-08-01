@@ -14,10 +14,13 @@ tile_h: s16 = 20;
 
 PLAYER_COLOR :: rl.Color.{ 255, 0, 255, 255 };
 GOAL_COLOR :: rl.Color.{ 255, 215, 0, 255 };
-NORMAL_PLAYER_LIGHT_STR :: 12.0;
-ENHANCED_PLAYER_LIGHT_STR :: COLS.(float);
 
 STANDING_ON_WALL_BG :: rl.Color.{ 100, 100, 100, 100 };
+
+LIGHT_SOURCE_KINDS :: struct{
+  kind: Entity_Kind;
+  strength: s16;
+}.[ .{ .DEAD_MARTYR, 6 }, .{ .FIRE, 6 } ];
 
 FIRE_COLOR_1 :: rl.Color.{ 255,90,0,50 };
 FIRE_COLOR_2 :: rl.Color.{ 255,154,0,50 };
@@ -46,10 +49,6 @@ GameState :: struct {
   loop: [4]CharacterType;
   current_loop_idx: int = 0;
   iterations: int = 0;
-
-  player_light_strength: float = NORMAL_PLAYER_LIGHT_STR;
-  prev_light_strength: s16 = NORMAL_PLAYER_LIGHT_STR.(s16);
-  curr_light_strength: s16 = NORMAL_PLAYER_LIGHT_STR.(s16);
 
   shake_duration: float = 0.0;
   shake_intensity: float = 0.0;
@@ -106,9 +105,8 @@ PlayerMove :: struct {
 }
 
 PlayerDied :: struct {}
-LightUpdate :: struct {}
 
-Command :: Tagged_Union(PlayerMove, PlayerDied, LightUpdate);
+Command :: Tagged_Union(PlayerMove, PlayerDied);
 
 EntityWorld :: struct {
   entities: [..]Entity;   
@@ -151,19 +149,23 @@ Entity :: struct {
   glyph: int;
   move_tick: s16;
   alpha_modifier: float = 1.0;
-  
   door_open: bool;
-
   character_type: CharacterType;
   swiping_dir: SVector;
   swipe_counter: float;
-
   action_prepped: bool = false;
-
+  laser_direction: SVector;
+  laser_state: enum {
+    OFF :: 0;
+    OFF2 :: 1;
+    ON :: 2;
+    ON2 :: 3;
+    LOOP_BACK :: 4;
+  };
   fire_t: float;
 }
 
-NUM_ENTITY_KIND :: 10;
+NUM_ENTITY_KIND :: 11;
 Entity_Kind :: enum u32 {
   PLAYER;
   ENEMY; 
@@ -175,6 +177,7 @@ Entity_Kind :: enum u32 {
   DEAD_MARTYR;
   DIGGABLE; 
   GOAL; 
+  LASER;
 }
 
 entity_world_init :: (world: *EntityWorld) {
@@ -302,11 +305,13 @@ is_walkable :: (pos: SVector) -> bool, Entity_Kind {
     case .WALL; #through;
     case .LEVER; #through;
     case .DIGGABLE; #through;
+    case .LASER; #through;
     case .KILL_TILE; return false, entity.kind;
   }
 
   return true, entity.kind;
 }
+
 is_occupied_by_enemy :: (pos: SVector) -> u32, bool {
   for world.entity_groups[Entity_Kind.ENEMY] {
     if it.pos.x == pos.x && it.pos.y == pos.y then return it.id, true;
@@ -358,6 +363,123 @@ create_wall :: (pos: SVector) {
   wall.glyph = 35;
 
   entity_world_add(*world, wall);
+}
+
+laser_direction_to_glyph :: (dir: SVector) -> u8 {
+  if dir.x == 1 then return ">"[0];
+  if dir.x == -1 then return "<"[0];
+  if dir.y == -1 then return "^"[0];
+  if dir.y == 1 then return "v"[0];
+  return "?"[0];
+}
+
+laser_pos_open :: (pos: SVector) -> bool {
+  e := find_entity_at(pos);
+  if !e {
+    return true;
+  }
+
+  if e.kind == {
+    case .WALL; #through;
+    case .DOOR; #through;
+    case .LEVER; #through;
+    case .KILL_TILE; #through;
+    case .DEAD_MARTYR; #through;
+    case .DIGGABLE; #through;
+    case .GOAL; #through;
+    case .LASER; return false;
+  }
+
+  if !is_valid(pos) {
+    return false;
+  }
+
+  return true;
+}
+
+get_laser_path :: (laser: *Entity) -> [..]SVector {
+  path: [..]SVector;
+  path.allocator = temp;
+  pos := laser.pos + laser.laser_direction;
+  while laser_pos_open(pos) {
+    array_add(*path, pos);
+    pos += laser.laser_direction;
+  }
+  return path;
+}
+
+create_laser :: (pos: SVector, dir: SVector) {
+  render_laser :: (laser: *Entity) {
+    cell := *buffer[laser.pos.x][laser.pos.y];
+    cell.fg = laser.color;
+    cell.glyph = laser.glyph;
+
+    // Draw glyph in the direction of the laser until we hit something that stops it
+    if laser.laser_state == .ON || laser.laser_state == .ON2 {
+      MINIMUM_ALPHA :: 30;
+      alpha: u16 = 255;
+      path := get_laser_path(laser);
+      player := world.entity_groups[Entity_Kind.PLAYER][0];
+      for path {
+        cell = *buffer[it.x][it.y];
+        cell.glyph = "*"[0];
+        cell.fg = rl.RED;
+        cell.fg.a = alpha.(u8);
+
+        new_alpha := cell.fg.a.(u64) + get_lit_alpha(player.pos, it, 6);
+        new_alpha = min(new_alpha, 255);
+        cell.fg.a = new_alpha.(u8);
+
+        alpha = max(alpha-30, MINIMUM_ALPHA);
+      }
+    }
+  }
+
+  update_laser :: (laser: *Entity, dt: float) {
+    laser.glyph = laser_direction_to_glyph(laser.laser_direction);
+
+    cell := *buffer[laser.pos.x][laser.pos.y];
+    cell.shake = false;
+    if laser.laser_state == {
+      case .OFF;
+        laser.color = color(90, 90, 90, 255);
+      case .OFF2;
+        laser.color = color(90, 90, 90, 255);
+        cell.shake = true;
+      case .ON; #through;
+      case .ON2;
+        laser.color = color(255, 0, 0);
+    }
+
+    for world.commands {
+      player_move := isa(it, PlayerMove);
+      if player_move {
+        laser.laser_state += 1;
+        if laser.laser_state == .LOOP_BACK then laser.laser_state = .OFF;
+      }
+    }
+  }
+
+  laser: Entity;
+  laser.update_proc = update_laser;
+  laser.render_proc = render_laser;
+
+  // Tiles that blocks laser
+  // WALL, DOOR, LEVER, KILL_TILE, DEAD_MARTYR, DIGGABLE, GOAL, LASER
+  // Tiles that laser goes through
+  // FIRE
+  // Tiles that laser kills
+  // PLAYER, ENEMY
+  
+  laser.kind = .LASER;
+  laser.glyph = laser_direction_to_glyph(dir);
+  laser.color = color(255, 0, 0);
+
+  laser.pos = pos;
+  laser.laser_direction = dir;
+  laser.laser_state = .OFF;
+
+  entity_world_add(*world, laser);
 }
 
 create_diggable :: (pos: SVector) {
@@ -463,6 +585,19 @@ create_enemy :: (pos: SVector) {
       enemy.color = color(90, 90, 90, 255);
       enemy.move_tick = 0;
       return;
+    }
+
+    // Check if enemy is inside the beam of a laser
+    for laser : world.entity_groups[Entity_Kind.LASER] {
+      if laser.laser_state == .ON || laser.laser_state == .ON2 {
+        for pos : get_laser_path(laser) {
+          if pos == enemy.pos {
+            entity_world_remove(*world, enemy.id);
+            trigger_screen_shake(2, 1);
+            break;
+          }
+        }
+      }
     }
 
     for world.commands {
@@ -579,9 +714,9 @@ create_player :: () {
     if player.character_type == .SWIPER && kind == .ENEMY {
       // Yo! The swiper has moved into an enemy, kill it and kill the player
       entity_world_remove(*world, find_entity_at(new_pos).id);
-      command: Command;
-      set(*command, PlayerDied.{});
-      entity_world_push_command(*world, command); 
+      player.swiping_dir = xy(0, 0);
+      player.swipe_counter = 0.0;
+      trigger_screen_shake(2, 1);
       return false;
     }
     if player.character_type == .TINKERER && kind == .LEVER {
@@ -697,6 +832,20 @@ create_player :: () {
           player.action_prepped = true;
         }
 
+        // Check if we're standing in the path of a laser
+        for laser : world.entity_groups[Entity_Kind.LASER] {
+          if laser.laser_state == .ON || laser.laser_state == .ON2 {
+            for pos : get_laser_path(laser) {
+              if pos == player.pos {
+                cmd: Command;
+                set(*cmd, PlayerDied.{});
+                entity_world_push_command(*world, cmd);
+                break;
+              }
+            }
+          }
+        }
+
         // Shake baby
         cell := *buffer[player.pos.x][player.pos.y];
         cell.shake = player.action_prepped;
@@ -717,12 +866,6 @@ create_player :: () {
       // desired_light_strength: float = ifx on_mod_station then ENHANCED_PLAYER_LIGHT_STR else NORMAL_PLAYER_LIGHT_STR;
       // game_state.player_light_strength = lerp(game_state.player_light_strength, desired_light_strength, 1.0 * dt);
       // game_state.curr_light_strength = game_state.player_light_strength.(s16);
-
-      if game_state.curr_light_strength != game_state.prev_light_strength {
-        cmd: Command;
-        set(*cmd, LightUpdate);
-        entity_world_push_command(*world, cmd);
-      }
 
       // Process death
       for world.commands {
@@ -809,6 +952,10 @@ print_currently_selected_segment :: () {
           print("d"); 
         case .GOAL; 
           print("G");
+        case .LASER;
+          print("%", to_string(*laser_direction_to_glyph(e.laser_direction), 1));
+        case;
+          print("_");
       }
     }
       print("\n");
@@ -937,6 +1084,17 @@ edit_system :: (dt: float) {
           return;
         }
       }
+      if e.kind == .LASER {
+        if rl.GuiButton(rl.Rectangle.{220, height-50, 100, 50}, "ROTATE") {
+          if e.laser_direction.x == 1 {
+            e.laser_direction = xy(0, -1);
+          }
+          else if e.laser_direction.y == -1 then e.laser_direction = xy(-1, 0);
+          else if e.laser_direction.x == -1 then e.laser_direction = xy(0, 1);
+          else if e.laser_direction.y == 1 then e.laser_direction = xy(1, 0);
+          return;
+        }
+      }
     }else if game_state.selected_point.x != -1 {
       if rl.GuiButton(rl.Rectangle.{100*0, height-50, 90, 30}, "WALL") {
         create_wall(game_state.selected_point);
@@ -968,6 +1126,10 @@ edit_system :: (dt: float) {
       }
       if rl.GuiButton(rl.Rectangle.{100*7, height-50, 90, 30}, "GOAL") {
         create_goal(game_state.selected_point);
+        game_state.selected_point.x = -1;
+      }
+      if rl.GuiButton(rl.Rectangle.{100*0, height-80, 90, 30}, "LASER") {
+        create_laser(game_state.selected_point, xy(1, 0));
         game_state.selected_point.x = -1;
       }
     }
@@ -1022,21 +1184,17 @@ glyph_basic_update_system :: (dt: float) {
     if player_move {
       for *world.entities {
         if is_basic_rendered(it.kind) {
-          it.color.a = get_lit_alpha(player_move.player.pos, it.pos, game_state.curr_light_strength);
+          // Basisc player litness
+          it.color.a = get_lit_alpha(player_move.player.pos, it.pos, 12);
 
-          // Dead martyrs light up the world
-          for dead_martyr : world.entity_groups[Entity_Kind.DEAD_MARTYR] {
-            new_alpha := it.color.a.(u64) + get_lit_alpha(dead_martyr.pos, it.pos, 6).(u64);
-            max_alpha: u64 = 255;
-            new_alpha = min(max_alpha, new_alpha);
-            it.color.a = new_alpha.(u8);
-          }
-
-          for fire : world.entity_groups[Entity_Kind.FIRE] {
-            new_alpha := it.color.a.(u64) + get_lit_alpha(fire.pos, it.pos, 6).(u64);
-            max_alpha: u64 = 255;
-            new_alpha = min(max_alpha, new_alpha);
-            it.color.a = new_alpha.(u8);
+          // Other tiles that can give light
+          for kind_strength : LIGHT_SOURCE_KINDS {
+            for source : world.entity_groups[kind_strength.kind] {
+              new_alpha := it.color.a.(u64) + get_lit_alpha(source.pos, it.pos, kind_strength.strength).(u64);
+              max_alpha: u64 = 255;
+              new_alpha = min(max_alpha, new_alpha);
+              it.color.a = new_alpha.(u8);
+            }
           }
 
           it.color.a = (it.color.a * it.alpha_modifier).(u8);

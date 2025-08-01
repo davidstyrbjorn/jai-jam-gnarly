@@ -11,6 +11,22 @@ create_level :: () {
   spawn_segment(pick_random_segment(segments[3].prefabs), xy(SEGMENT_SIZE, SEGMENT_SIZE));
 }
 
+create_up_laser :: (pos: SVector) {
+  create_laser(pos, xy(0, -1));
+}
+
+create_down_laser :: (pos: SVector) {
+  create_laser(pos, xy(0, 1));
+}
+
+create_right_laser :: (pos: SVector) {
+  create_laser(pos, xy(1, 0));
+}
+
+create_left_laser :: (pos: SVector) {
+  create_laser(pos, xy(-1, 0));
+}
+
 character_and_spawner :: struct{
   char: u8;
   spawner: #type (pos: SVector);
@@ -23,6 +39,11 @@ character_and_spawner :: struct{
   .{ "F"[0].(u8), create_fire },
   .{ "d"[0].(u8), create_diggable },
   .{ "G"[0].(u8), create_goal },
+  .{ ">"[0].(u8), create_right_laser },
+  .{ "<"[0].(u8), create_left_laser },
+  .{ "^"[0].(u8), create_up_laser },
+  .{ "v"[0].(u8), create_down_laser },
+
 ];
 
 exists_as_spawner :: (c: u8) -> bool {
