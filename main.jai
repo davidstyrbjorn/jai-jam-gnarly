@@ -36,7 +36,6 @@ GameState :: struct {
   // Used for editing
   edit_mode: bool = false;
   selected_point: SVector;
-  connecting_to_door: bool = false;
   editing_loop_index: int = -1;
 
   loop: [4]CharacterType;
@@ -70,6 +69,12 @@ operator == :: (left: SVector, right: SVector) -> bool {
 
 is_zero :: (s: SVector) -> bool {
   return s.x == 0 && s.y == 0;
+}
+
+sdistance :: (a: SVector, b: SVector) -> float {
+  a_float := Vector2.{ a.x.(float), a.y.(float) };  
+  b_float := Vector2.{ b.x.(float), b.y.(float) };
+  return distance(a_float, b_float);  
 }
 
 buffer: [COLS][ROWS]Cell;
@@ -138,8 +143,6 @@ Entity :: struct {
   move_tick: s16;
   alpha_modifier: float = 1.0;
   
-  door_connections: [..]SVector;
-
   door_open: bool;
 
   character_type: CharacterType;
@@ -496,6 +499,29 @@ create_enemy :: (pos: SVector) {
   entity_world_add(*world, enemy);
 }
 
+open_closest_door :: (from: SVector) {
+  segment_start := get_segment_start(from);
+  closest_door: *Entity = null;
+  for y: segment_start.y..segment_start.y+SEGMENT_SIZE-1 {
+    for x: segment_start.x..segment_start.x+SEGMENT_SIZE-1 {
+      e := find_entity_at(xy(x,y));
+      if !e then continue;
+      if e.kind == .DOOR {
+        if !closest_door then closest_door = e;
+        else {
+          if sdistance(e.pos, from) < sdistance(closest_door.pos, from) {
+            closest_door = e;
+          }
+        } 
+      }
+    }
+  }
+
+  if closest_door {
+    closest_door.door_open = true;
+  }
+}
+
 create_player :: () {
   set_player_pos :: (player: *Entity, x: s16, y: s16) {
     command: Command;
@@ -537,11 +563,7 @@ create_player :: () {
       return false;
     }
     if player.character_type == .TINKERER && kind == .LEVER {
-      lever := find_entity_at(new_pos);
-      for lever.door_connections {
-        door := find_entity_at(it);
-        door.door_open = true;
-      }
+      open_closest_door(new_pos);
     }
     if player.character_type == .DIGGER && kind == .DIGGABLE {
       entity_world_remove(*world, find_entity_at(new_pos).id);
@@ -663,29 +685,22 @@ create_player :: () {
   entity_world_add(*world, player);
 }
 
-connect_lever_to_door :: (lever_pos: SVector, door_pos: SVector) {
-  lever := find_entity_at(lever_pos);
-  assert(lever != null && lever.kind == .LEVER);
-
-  door := find_entity_at(door_pos);
-  assert(door != null && door.kind == .DOOR);
-
-  array_add(*lever.door_connections, door_pos);
-}
-
 trigger_screen_shake :: (intensity: float, duration: float) {
   game_state.shake_intensity = intensity;
   game_state.shake_duration = duration;
 }
 
+get_segment_start :: (point: SVector) -> SVector {
+  start: SVector = xy(0, 0);
+  if point.x < SEGMENT_SIZE && point.y < SEGMENT_SIZE then start = xy(0, 0);
+  else if point.x >= SEGMENT_SIZE && point.y < SEGMENT_SIZE then start = xy(SEGMENT_SIZE, 0);
+  else if point.x < SEGMENT_SIZE && point.y >= SEGMENT_SIZE then start = xy(0, SEGMENT_SIZE);
+  else start = xy(SEGMENT_SIZE, SEGMENT_SIZE);
+  return start;
+}
+
 print_currently_selected_segment :: () {
-  // Print the currently selected segment as a string that can be copy pasted into a file
-  segment_offset: SVector = xy(0, 0);
-  sp := game_state.selected_point;
-  if sp.x < SEGMENT_SIZE && sp.y < SEGMENT_SIZE then segment_offset = xy(0, 0);
-  else if sp.x >= SEGMENT_SIZE && sp.y < SEGMENT_SIZE then segment_offset = xy(SEGMENT_SIZE, 0);
-  else if sp.x < SEGMENT_SIZE && sp.y >= SEGMENT_SIZE then segment_offset = xy(0, SEGMENT_SIZE);
-  else segment_offset = xy(SEGMENT_SIZE, SEGMENT_SIZE);
+  segment_offset := get_segment_start(game_state.selected_point);
   
   print("BEGIN LEVEL");
 
@@ -758,7 +773,7 @@ edit_system :: (dt: float) {
     rl.DrawRectangle(pos.x.(s32), pos.y.(s32), tile_w, tile_h, color(20, 255, 30, 100));
   }
   
-  if rl.IsMouseButtonPressed(.MOUSE_BUTTON_LEFT) && (game_state.selected_point.x == -1 || game_state.connecting_to_door) {
+  if rl.IsMouseButtonPressed(.MOUSE_BUTTON_LEFT) && game_state.selected_point.x == -1 {
     mouse_pos := rl.GetMousePosition();
     mouse_pos.x /= rl.GetScreenWidth();
     mouse_pos.y /= rl.GetScreenHeight();
@@ -776,18 +791,6 @@ edit_system :: (dt: float) {
         }
         idx += 1;
       }
-    }
-
-    // Check if we're assigning door to a lever
-    if game_state.connecting_to_door {
-      maybe_door := find_entity_at(grid_pos);
-      if maybe_door != null && maybe_door.kind == .DOOR {
-        lever := find_entity_at(game_state.selected_point);
-        array_add(*lever.door_connections, grid_pos);
-      }
-
-      game_state.connecting_to_door = false;
-      return;
     }
 
     game_state.selected_point = grid_pos;
@@ -848,19 +851,10 @@ edit_system :: (dt: float) {
         return;
       }
       if e.kind == .LEVER {
-        if rl.GuiButton(rl.Rectangle.{110, height-50, 100, 50}, "CONNECT") {
-          game_state.connecting_to_door = true;
-          return;
-        }
         if rl.GuiButton(rl.Rectangle.{220, height-50, 100, 50}, "PULL") {
-          for e.door_connections {
-            door := find_entity_at(it);
-            assert(door != null && door.kind == .DOOR);
-            door.door_open = true;
-          }
+          // TODO: New behaviour
           return;
         }
-        rl.GuiLabel(rl.Rectangle.{ 330, height-50, 100, 50 }, to_c_string(tprint("doors = %", e.door_connections.count)));
       }
     }else if game_state.selected_point.x != -1 {
       if rl.GuiButton(rl.Rectangle.{100*0, height-50, 90, 30}, "WALL") {
