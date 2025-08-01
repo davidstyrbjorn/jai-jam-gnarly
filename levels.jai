@@ -2,12 +2,10 @@ create_level :: () {
   pick_random_segment :: (prefabs: []string) -> string {
     some_rand := random_get();
     rand_index := some_rand % prefabs.count.(u64);
-    print("rand_index = %, prefabs.count = %, some_rand = %\n", rand_index, prefabs.count, some_rand);
     return prefabs[rand_index];
   }
 
   spawn_segment(pick_random_segment(segments[0].prefabs), xy(0, 0));
-  // spawn_segment(segments[0].prefabs[1], xy(0, 0));
   spawn_segment(pick_random_segment(segments[1].prefabs), xy(SEGMENT_SIZE, 0));
   spawn_segment(pick_random_segment(segments[2].prefabs), xy(0, SEGMENT_SIZE));
   spawn_segment(pick_random_segment(segments[3].prefabs), xy(SEGMENT_SIZE, SEGMENT_SIZE));
@@ -38,7 +36,6 @@ spawn_segment :: (prefab: string, start: SVector) {
   pos := start;
   counter := 0;
   for 0..prefab.count-1 {
-
     if prefab[it] != "_"[0] && !exists_as_spawner(prefab[it]) {
       continue;
     }

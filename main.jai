@@ -36,7 +36,12 @@ GameState :: struct {
   // Used for editing
   edit_mode: bool = false;
   selected_point: SVector;
+
+  // PICKING_LOOP related
   editing_loop_index: int = -1;
+  modifying_loop_index: bool = false;
+  desired_character_type: CharacterType;
+  on_back_button: bool = false;
 
   loop: [4]CharacterType;
   current_loop_idx: int = 0;
@@ -598,7 +603,52 @@ create_player :: () {
     player.glyph = CHARACTER_GLYPHS[player.character_type].(int);
 
     if game_state.state == .PICKING_LOOP {
+      // This is a godamn shitshow... UI!!!
+      if game_state.modifying_loop_index {
+        if rl.IsKeyPressed(.KEY_D) {
+          game_state.desired_character_type += 1;
+        }
+        else if rl.IsKeyPressed(.KEY_A) {
+          game_state.desired_character_type -= 1;
+        } 
+        game_state.desired_character_type = clamp(game_state.desired_character_type, 0, CharacterType.DIGGER);
 
+        if rl.IsKeyPressed(.KEY_SPACE) {
+          game_state.loop[game_state.editing_loop_index] = game_state.desired_character_type;
+          // Done, reset
+          game_state.modifying_loop_index = false;
+          game_state.desired_character_type = 0;          
+        }
+      } 
+      else if game_state.on_back_button {
+        if rl.IsKeyPressed(.KEY_W) {
+          game_state.on_back_button = false;
+        }
+        else if rl.IsKeyPressed(.KEY_SPACE) {
+          // Reset and now we can switch over to PLAYING state
+          game_state.on_back_button = false;
+          game_state.desired_character_type = 0;
+          game_state.modifying_loop_index = false;
+          game_state.editing_loop_index = 0;
+
+          game_state.state = .PLAYING;
+        }
+      } 
+      else {
+        if rl.IsKeyPressed(.KEY_D) {
+          game_state.editing_loop_index += 1;
+        }
+        else if rl.IsKeyPressed(.KEY_A) {
+          game_state.editing_loop_index -= 1;
+        } 
+        else if rl.IsKeyPressed(.KEY_SPACE) {
+          game_state.modifying_loop_index = true;
+        }
+        else if rl.IsKeyPressed(.KEY_S) {
+          game_state.on_back_button = true;  
+        }
+        game_state.editing_loop_index = clamp(game_state.editing_loop_index, 0, 3);
+      }
     }
     if game_state.state == .PLAYING {
       SWIPE_MOVE_FREQ :: 0.1; // Seconds
@@ -668,7 +718,7 @@ create_player :: () {
   render_player :: (player: *Entity) {
     player_cell := *buffer[player.pos.x][player.pos.y];
     player_cell.fg = PLAYER_COLOR;
-    if game_state.state != .PLAYING {
+    if game_state.state == .MENU || game_state.state == .TRANSITION {
       player_cell.fg.a = 0;
     }
     player_cell.glyph = player.glyph;
@@ -966,13 +1016,14 @@ glyph_basic_update_system :: (dt: float) {
 }
 
 render_ui_system :: () {
-  draw_string :: (start_x: s16, y: s16, str: string) {
+  draw_string :: (start_x: s16, y: s16, str: string, background: rl.Color = rl.BLANK) {
     x := start_x;
     for i : 0..str.count-1 {
       c := str[i];
       cell := *buffer[x][y];
       cell.glyph = c;
       cell.fg = rl.WHITE;
+      cell.bg = background;
       x += 1;
     }
   }
@@ -991,22 +1042,50 @@ render_ui_system :: () {
       cell.bg.a = 10;
     }
   }
-  if game_state.state == .PLAYING {
-    // Draw the indicator on the current loop character
+  if game_state.state == .PLAYING || game_state.state == .PICKING_LOOP {
     cell := *buffer[CYCLE_START_X + game_state.current_loop_idx][CYCLE_Y+1];
-    cell.glyph = 94;
-    cell.fg = rl.WHITE;
+    if game_state.state == .PLAYING {
+      cell.glyph = 94;
+      cell.fg = rl.WHITE;
+    }
 
-    // Draw the current character
     for 0..3 {
       cell = *buffer[CYCLE_START_X+it][CYCLE_Y];
       cell.glyph = CHARACTER_GLYPHS[game_state.loop[it]].(int);
       cell.fg = PLAYER_COLOR;
+      cell.bg = rl.GRAY;
+
+      if game_state.state == .PICKING_LOOP && game_state.editing_loop_index == it && !game_state.on_back_button {
+        cell.bg.a = 100;
+      }else {
+        cell.bg.a = 0;
+      }
     }
 
-    draw_string(CYCLE_START_X, CYCLE_Y-2, "R=next");
-    iterations_str := tprint("loops=%", game_state.iterations);
-    draw_string(CYCLE_START_X, CYCLE_Y+2, iterations_str);
+    if game_state.state == .PLAYING {
+      draw_string(CYCLE_START_X, CYCLE_Y-2, "R=next");
+      iterations_str := tprint("loops=%", game_state.iterations);
+      draw_string(CYCLE_START_X, CYCLE_Y+2, iterations_str);
+    } else if game_state.state == .PICKING_LOOP {
+      draw_string(CYCLE_START_X, CYCLE_Y-2, "MOD YOUR LOOP");
+      draw_string(CYCLE_START_X, CYCLE_Y+1, "DONE", ifx game_state.on_back_button then rl.ColorAlpha(rl.GRAY, 100) else rl.BLANK);
+
+      if game_state.modifying_loop_index {
+        // List all available characters to choose from
+        for 0..CharacterType.DIGGER {
+          cell := *buffer[5+CYCLE_START_X+it][CYCLE_Y];
+          cell.glyph = CHARACTER_GLYPHS[it].(int);
+          cell.fg = PLAYER_COLOR;
+          cell.bg = rl.GRAY;
+
+          if game_state.desired_character_type == it {
+            cell.bg.a = 100;
+          } else {
+            cell.bg.a = 0;
+          }
+        }
+      }
+    }
   }
   else if game_state.state == .MENU {
     prompt := "PRESS SPACE";
@@ -1051,7 +1130,13 @@ transition_system :: (dt: float) {
     }
   }
   if !game_state.transition_out && game_state.transition_t < 0.0 {
-    game_state.state = .PLAYING;
+    if game_state.spawn_level_flag {
+      game_state.state = .PICKING_LOOP;
+      game_state.editing_loop_index = 0;
+      game_state.modifying_loop_index = false;
+    } else {
+      game_state.state = .PLAYING;
+    }         
     for y : 0..ROWS-1 {
       for x : 0..COLS-1 {
         cell := *buffer[x][y];
