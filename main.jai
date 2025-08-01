@@ -3,13 +3,14 @@ RELEASE_BUILD :: false;
 
 UI_START_Y :: 41 - 6;
 
-COLS: s16 : 41;
+COLS: s16 : 40;
 ROWS: s16 : 41;
 
 tile_w: s16 = 24;
 tile_h: s16 = 24;
 
 PLAYER_COLOR :: rl.Color.{ 255, 0, 255, 255 };
+GOAL_COLOR :: rl.Color.{ 255, 215, 0, 255 };
 NORMAL_PLAYER_LIGHT_STR :: 9.0;
 ENHANCED_PLAYER_LIGHT_STR :: COLS.(float);
 
@@ -22,8 +23,6 @@ CYCLE_START_X :: 3;
 CYCLE_Y :: UI_START_Y + 3;
 
 GameState :: struct {
-  glitcher_counter: float = 0.0;
-
   // Used for editing
   edit_mode: bool = false;
   selected_point: SVector;
@@ -35,11 +34,21 @@ GameState :: struct {
   iterations: int = 0;
 
   player_light_strength: float = NORMAL_PLAYER_LIGHT_STR;
-  prev_light_strength: s16;
-  curr_light_strength: s16;
+  prev_light_strength: s16 = NORMAL_PLAYER_LIGHT_STR.(s16);
+  curr_light_strength: s16 = NORMAL_PLAYER_LIGHT_STR.(s16);
 
   shake_duration: float = 0.0;
   shake_intensity: float = 0.0;
+  transition_t: float = 0.0;
+  transition_origin: Vector2;
+
+  transition_out: bool;
+
+  state : enum {
+    TRANSITION;
+    PLAYING;
+    PICKING_LOOP;
+  } = .PLAYING;
 }
 game_state: GameState;
 world: EntityWorld;
@@ -74,7 +83,6 @@ PlayerMove :: struct {
 }
 
 PlayerDied :: struct {}
-
 LightUpdate :: struct {}
 
 Command :: Tagged_Union(PlayerMove, PlayerDied, LightUpdate);
@@ -142,8 +150,8 @@ Entity_Kind :: enum u32 {
   KILL_TILE;
   FIRE;
   DEAD_MARTYR;
-  MOD_STATION;
   DIGGABLE;
+  GOAL;
 }
 
 entity_world_init :: (world: *EntityWorld) {
@@ -290,14 +298,27 @@ clear_buffer :: () {
   }
 }
 
-create_mod_station :: (pos: SVector) {
-  e: Entity;
-  e.kind = .MOD_STATION;
-  e.pos = pos;
-  e.glyph = 43;
-  e.color = color(0, 255, 100, 255);
+create_goal :: (pos: SVector) {
+  goal_update :: (goal: *Entity, dt: float) {
+    for world.commands {
+      player_move := isa(it, PlayerMove);
+      if player_move {
+        if player_move.new_pos.x == goal.pos.x && player_move.new_pos.y == goal.pos.y {
+          level_completed(player_move.new_pos);
+        }
+      }
+    }
+  }
 
-  entity_world_add(*world, e);
+  goal: Entity;
+  goal.kind = .GOAL;
+  goal.pos = pos;
+  goal.color = GOAL_COLOR;
+  goal.glyph = 88;
+
+  goal.update_proc = goal_update;
+
+  entity_world_add(*world, goal);
 }
 
 create_wall :: (pos: SVector, is_diggable := false) {
@@ -567,20 +588,12 @@ create_player :: () {
     }
 
     // Are we currently standing on a mod station tile? 
-    on_mod_station := false;
-    for mod_station : world.entity_groups[Entity_Kind.MOD_STATION] {
-      if mod_station.pos == player.pos {
-        on_mod_station = true;
-        break;
-      }
-    }
-    game_state.prev_light_strength = game_state.player_light_strength.(s16);
-    desired_light_strength: float = ifx on_mod_station then ENHANCED_PLAYER_LIGHT_STR else NORMAL_PLAYER_LIGHT_STR;
-    game_state.player_light_strength = lerp(game_state.player_light_strength, desired_light_strength, 1.0 * dt);
-    game_state.curr_light_strength = game_state.player_light_strength.(s16);
+    // game_state.prev_light_strength = game_state.player_light_strength.(s16);
+    // desired_light_strength: float = ifx on_mod_station then ENHANCED_PLAYER_LIGHT_STR else NORMAL_PLAYER_LIGHT_STR;
+    // game_state.player_light_strength = lerp(game_state.player_light_strength, desired_light_strength, 1.0 * dt);
+    // game_state.curr_light_strength = game_state.player_light_strength.(s16);
 
     if game_state.curr_light_strength != game_state.prev_light_strength {
-      print("light update!\n");
       cmd: Command;
       set(*cmd, LightUpdate);
       entity_world_push_command(*world, cmd);
@@ -601,7 +614,8 @@ create_player :: () {
     }
     if rl.IsKeyPressed(.KEY_TAB) then game_state.edit_mode = !game_state.edit_mode;
     if rl.IsKeyPressed(.KEY_P) then print_level();
-    if rl.IsKeyPressed(.KEY_X) then trigger_screen_shake(5, 1);
+    // if rl.IsKeyPressed(.KEY_X) then trigger_screen_shake(5, 1);
+    if rl.IsKeyPressed(.KEY_X) then level_completed(player.pos);
 }
   }
 
@@ -661,9 +675,6 @@ print_level :: () {
       append(*builder, tprint("connect_lever_to_door(xy(%, %), xy(%, %));\n", it.pos.x, it.pos.y, door_pos.x, door_pos.y));
     }
   }
-  for world.entity_groups[Entity_Kind.MOD_STATION] {
-    append(*builder, tprint("create_mod_station(xy(%, %));\n", it.pos.x, it.pos.y));
-  }
 
   file_name := tprint("./level.in");
   file, success := file_open(file_name, true);
@@ -675,15 +686,11 @@ print_level :: () {
 }
 
 kill_tile_system :: (dt: float) {
-  KILL_TILE_UPDATE :: 0.8;   
-  game_state.glitcher_counter += dt;
-  if game_state.glitcher_counter >= KILL_TILE_UPDATE {
-    for world.entity_groups[Entity_Kind.KILL_TILE] {
-      if random_get() % 100 < 10 {
-        it.glyph = cast(int)(32 + random_get() % (126-32));
-      }
+  for world.entity_groups[Entity_Kind.KILL_TILE] {
+    if random_get() % 100 < 10 {
+      it.glyph = cast(int)(32 + random_get() % (126-32));
     }
-  }                               
+  }
 }
 
 find_entity_at :: (pos: SVector) -> *Entity {
@@ -829,16 +836,16 @@ edit_system :: (dt: float) {
         create_enemy(game_state.selected_point);
         game_state.selected_point.x = -1;
       }
-      if rl.GuiButton(rl.Rectangle.{100*5, height-50, 90, 30}, "MOD") {
-        create_mod_station(game_state.selected_point);
-        game_state.selected_point.x = -1;
-      }
-      if rl.GuiButton(rl.Rectangle.{100*6, height-50, 90, 30}, "DIGGABLE") {
+      if rl.GuiButton(rl.Rectangle.{100*5, height-50, 90, 30}, "DIGGABLE") {
         create_wall(game_state.selected_point, true);
         game_state.selected_point.x = -1;
       }
-      if rl.GuiButton(rl.Rectangle.{100*7, height-50, 90, 30}, "FIRE") {
+      if rl.GuiButton(rl.Rectangle.{100*6, height-50, 90, 30}, "FIRE") {
         create_fire(game_state.selected_point);
+        game_state.selected_point.x = -1;
+      }
+      if rl.GuiButton(rl.Rectangle.{100*7, height-50, 90, 30}, "GOAL") {
+        create_goal(game_state.selected_point);
         game_state.selected_point.x = -1;
       }
     }
@@ -861,6 +868,7 @@ glyph_basic_render_system :: () {
     }
   }
 
+  // Color background if player is overlapping with wall
   player := world.entity_groups[Entity_Kind.PLAYER][0];
   for world.entity_groups[Entity_Kind.WALL] {
     if it.pos == player.pos {
@@ -869,17 +877,27 @@ glyph_basic_render_system :: () {
       break;
     }
   }
+
+  // Color background if player is overlapping with goal
+  for world.entity_groups[Entity_Kind.GOAL] {
+    if it.pos == player.pos {
+      cell := *buffer[it.pos.x][it.pos.y];
+      cell.bg = GOAL_COLOR;
+      cell.bg.a = 160;
+      break;      
+    }
+  }
 }
 
 is_basic_rendered :: (kind: Entity_Kind) -> bool {
-  return kind == .WALL || kind == .ENEMY || kind == .KILL_TILE || kind == .DOOR || kind == .LEVER || kind == .DEAD_MARTYR || kind == .MOD_STATION || kind == .DIGGABLE;
+  return kind == .WALL || kind == .ENEMY || kind == .KILL_TILE || kind == .DOOR || kind == .LEVER || kind == .DEAD_MARTYR || kind == .DIGGABLE || kind == .GOAL;
 }
 
 glyph_basic_update_system :: (dt: float) {
   for cmd : world.commands {
     player_move := isa(cmd, PlayerMove);
-    light_update := isa(cmd, LightUpdate);
-    if player_move || light_update {
+    // light_update := isa(cmd, LightUpdate);
+    if player_move {
       for *world.entities {
         if is_basic_rendered(it.kind) {
           it.color.a = get_lit_alpha(player_move.player.pos, it.pos, game_state.curr_light_strength);
@@ -953,6 +971,82 @@ render_ui_system :: () {
   draw_string(CYCLE_START_X, CYCLE_Y+2, iterations_str);
 }
 
+level_completed :: (from_pos: SVector) {
+  game_state.state = .TRANSITION;
+  game_state.transition_t = 0.0;
+  game_state.transition_origin = xy(from_pos.x.(float), from_pos.y.(float));
+  game_state.transition_out = true;
+  for y : 0..ROWS-1 {
+    for x : 0..COLS-1 {
+      cell := *buffer[x][y];
+      cell.override_flag = false;
+      cell.prev_override_flag = false;
+    }
+  }
+}
+
+transition_system :: (dt: float) {
+  if game_state.state != .TRANSITION then return;
+  if game_state.transition_out then game_state.transition_t += dt;
+  else game_state.transition_t -= dt;
+
+  if game_state.transition_out && game_state.transition_t > 1.1 {
+    game_state.transition_out = false;
+    // Reset player here
+    player := world.entity_groups[Entity_Kind.PLAYER][0];
+    player.pos = xy(1, 1);
+    game_state.transition_origin = xy(player.pos.x.(float), player.pos.y.(float));
+
+    command: Command;
+    set(*command, PlayerMove.{ player.pos, player.pos, player });
+    entity_world_push_command(*world, command);
+  }
+}
+
+transition_render_system :: () {
+  if game_state.state != .TRANSITION then return;
+
+  MAX_DIST_BETWEEN_TWO_CELLS :: #run distance(xy(0.0, 0.0), xy(COLS.(float), UI_START_Y));
+
+  for y : 0..UI_START_Y-1 {
+    for x : 0..COLS-1 {
+      cell := *buffer[x][y];
+
+      if game_state.transition_out {
+        if cell.override_flag {
+          if random_get_zero_to_one() < 0.1 {
+            cell.override_glyph = cast(int)(32 + random_get() % (126-32));
+          }
+        }else {
+          dist := distance(xy(x.(float),y.(float)), game_state.transition_origin);
+          if dist < MAX_DIST_BETWEEN_TWO_CELLS * game_state.transition_t {
+            cell.override_flag = true;  
+          }
+        }
+      }else {
+        if cell.override_flag {
+          // Check if its time to disable the override
+          dist := distance(xy(x.(float),y.(float)), game_state.transition_origin);
+          if dist > MAX_DIST_BETWEEN_TWO_CELLS * game_state.transition_t {
+            cell.override_flag = false;  
+          }
+          if random_get_zero_to_one() < 0.1 {
+            cell.override_glyph = cast(int)(32 + random_get() % (126-32));
+          }
+        }
+      }
+
+      if cell.override_flag != cell.prev_override_flag {
+        cell.override_fg = color_random();
+        cell.override_bg.a = 0;
+        cell.override_glyph = cast(int)(32 + random_get() % (126-32));
+      }
+
+      cell.prev_override_flag = cell.override_flag;
+    }
+  }
+}
+
 main :: () {
   rl.InitWindow(COLS * tile_w, ROWS * tile_h, "JaiJam - Loop Gang");
   rl.SetTargetFPS(60);
@@ -963,6 +1057,9 @@ main :: () {
   array_add(*world.update_systems, glyph_basic_update_system);
   array_add(*world.render_systems, glyph_basic_render_system);
   array_add(*world.render_systems, render_ui_system);
+
+  array_add(*world.update_systems, transition_system);
+  array_add(*world.render_systems, transition_render_system);
 
   // Fill up the world
   create_player();
@@ -1014,16 +1111,26 @@ main :: () {
         for x : 0..COLS-1 {
           cell := buffer[x][y];
 
+          // Respect the override
+          bg := cell.bg;
+          fg := cell.fg;
+          glyph := cell.glyph;
+          if cell.override_flag {
+            bg = cell.override_bg;
+            fg = cell.override_fg;
+            glyph = cell.override_glyph;
+          }
+
           local_offset := shake_offset;
           if y >= UI_START_Y then local_offset = xy(0.0, 0.0);
               
           // We now apply screen shake here
           rect_x := (x * tile_w) + local_offset.x.(s16);
           rect_y := (y * tile_h) + local_offset.y.(s16);
-          rl.DrawRectangle(rect_x, rect_y, tile_w, tile_h, cell.bg);
+          rl.DrawRectangle(rect_x, rect_y, tile_w, tile_h, bg);
 
           // Draw the glyph
-          glyph_index := rl.GetGlyphIndex(font, cell.glyph.(s32));
+          glyph_index := rl.GetGlyphIndex(font, glyph.(s32));
           rec := font.recs[glyph_index];
           
           pos_x := (x * tile_w) + (tile_w - rec.width)  / 2;
@@ -1034,7 +1141,7 @@ main :: () {
           final_pos_y := pos_y.(float) + local_offset.y;
           pos := Vector2.{ final_pos_x, final_pos_y };
           
-          rl.DrawTextureRec(font.texture, rec, pos, cell.fg);
+          rl.DrawTextureRec(font.texture, rec, pos, fg);
         }
       }
 
@@ -1051,6 +1158,7 @@ main :: () {
 #import "Tagged_Union";
 Table :: #import "Hash_Table";
 rl :: #import "raylib";
+#import "Sloppy_Math";
 
 #load "levels.jai";
 #load "ascii-math.jai";
