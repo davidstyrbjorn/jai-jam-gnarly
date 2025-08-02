@@ -20,7 +20,7 @@ STANDING_ON_WALL_BG :: rl.Color.{ 100, 100, 100, 100 };
 LIGHT_SOURCE_KINDS :: struct{
   kind: Entity_Kind;
   strength: s16;
-}.[ .{ .DEAD_MARTYR, 6 }, .{ .FIRE, 6 } ];
+}.[ .{ .DEAD_MARTYR, 6 }, .{ .FIRE, 6 }, .{ .FIREBALL, 4 } ];
 
 FIRE_COLOR_1 :: rl.Color.{ 255,90,0,50 };
 FIRE_COLOR_2 :: rl.Color.{ 255,154,0,50 };
@@ -93,7 +93,7 @@ CharacterType :: enum {
   MARTYR :: 2;
   DIGGER :: 3;
   // ALCHEMIST - randomly change type of tile
-  // WIZARD - ranged based attack & also controls levers
+  WIZARD :: 4;
 }
 
 /// --- BEGIN ENTITY 
@@ -105,8 +105,9 @@ PlayerMove :: struct {
 }
 
 PlayerDied :: struct {}
+FireballMove :: struct { _: bool; }
 
-Command :: Tagged_Union(PlayerMove, PlayerDied);
+Command :: Tagged_Union(PlayerMove, PlayerDied, FireballMove);
 
 EntityWorld :: struct {
   entities: [..]Entity;   
@@ -163,9 +164,12 @@ Entity :: struct {
     LOOP_BACK :: 4;
   };
   fire_t: float;
+
+  fireball_direction: SVector;
+  fireball_t: float;
 }
 
-NUM_ENTITY_KIND :: 11;
+NUM_ENTITY_KIND :: 12;
 Entity_Kind :: enum u32 {
   PLAYER;
   ENEMY; 
@@ -178,6 +182,7 @@ Entity_Kind :: enum u32 {
   DIGGABLE; 
   GOAL; 
   LASER;
+  FIREBALL;
 }
 
 entity_world_init :: (world: *EntityWorld) {
@@ -482,6 +487,55 @@ create_laser :: (pos: SVector, dir: SVector) {
   entity_world_add(*world, laser);
 }
 
+create_fireball :: (pos: SVector, dir: SVector) {
+  fireball_render :: (fireball: *Entity) {
+    cell := *buffer[fireball.pos.x][fireball.pos.y];
+    cell.fg = fireball.color;
+    cell.glyph = fireball.glyph;
+  }
+
+  fireball_update :: (fireball: *Entity, dt: float) {
+    FIREBALL_FREQ :: 0.1;
+    fireball.fireball_t += dt;
+    if fireball.fireball_t > FIREBALL_FREQ {
+      fireball.fireball_t = 0;
+
+      cmd: Command;
+      set(*cmd, FireballMove.{ true });
+      entity_world_push_command(*world, cmd);
+      prev_pos := fireball.pos;
+      fireball.pos += fireball.fireball_direction;
+      walkable, kind := is_walkable(fireball.pos); 
+      if !walkable {
+        entity_world_remove(*world, fireball.id);
+        trigger_screen_shake(2, 0.25);
+        return;
+      }
+
+      // Random chance to leave a fire if the tile is empty
+      if kind == .FIREBALL {
+        if random_get() % 100 > 50 {
+          create_fire(prev_pos);
+        }
+      }
+    } 
+  }
+  
+  fireball: Entity;
+  fireball.kind = .FIREBALL;
+  fireball.glyph = "*"[0];
+  fireball.color = FIRE_COLOR_1;
+  fireball.color.a = 255;
+  fireball.pos = pos;
+  fireball.fireball_direction = dir;
+  fireball.fireball_t = 0.0;
+
+  fireball.render_proc = fireball_render;
+  fireball.update_proc = fireball_update;
+
+  entity_world_add(*world, fireball);
+}
+
 create_diggable :: (pos: SVector) {
   diggable: Entity;
 
@@ -597,6 +651,16 @@ create_enemy :: (pos: SVector) {
             break;
           }
         }
+      }
+    }
+
+    // Check if we're hit by a fireball
+    for fireball : world.entity_groups[Entity_Kind.FIREBALL] {
+      if fireball.pos == enemy.pos {
+        entity_world_remove(*world, enemy.id);
+        entity_world_remove(*world, fireball.id);
+        trigger_screen_shake(2, 1);
+        break;
       }
     }
 
@@ -763,7 +827,7 @@ create_player :: () {
         else if rl.IsKeyPressed(.KEY_A) {
           game_state.desired_character_type -= 1;
         } 
-        game_state.desired_character_type = clamp(game_state.desired_character_type, 0, CharacterType.DIGGER);
+        game_state.desired_character_type = clamp(game_state.desired_character_type, 0, CharacterType.WIZARD);
 
         if rl.IsKeyPressed(.KEY_SPACE) {
           game_state.loop[game_state.editing_loop_index] = game_state.desired_character_type;
@@ -823,13 +887,17 @@ create_player :: () {
           if player.character_type == .TINKERER && player.action_prepped {
             tinkerer_place_wall(player.pos + input);
             player.action_prepped = false;
-          }else {
+          }
+          else if player.character_type == .WIZARD && player.action_prepped {
+            create_fireball(player.pos + input, input);
+            player.action_prepped = false;
+          } else {
             move_player(player, input);
           }
         }
 
-        if rl.IsKeyPressed(.KEY_SPACE) && player.character_type == .TINKERER {
-          player.action_prepped = true;
+        if rl.IsKeyPressed(.KEY_SPACE) && (player.character_type == .TINKERER || player.character_type == .WIZARD) {
+          player.action_prepped = !player.action_prepped;
         }
 
         // Check if we're standing in the path of a laser
@@ -1178,14 +1246,15 @@ is_basic_rendered :: (kind: Entity_Kind) -> bool {
 }
 
 glyph_basic_update_system :: (dt: float) {
+  player := world.entity_groups[Entity_Kind.PLAYER][0];
   for cmd : world.commands {
     player_move := isa(cmd, PlayerMove);
-    // light_update := isa(cmd, LightUpdate);
-    if player_move {
+    fireball_move := isa(cmd, FireballMove);
+    if player_move || fireball_move {
       for *world.entities {
         if is_basic_rendered(it.kind) {
           // Basisc player litness
-          it.color.a = get_lit_alpha(player_move.player.pos, it.pos, 12);
+          it.color.a = get_lit_alpha(player.pos, it.pos, 12);
 
           // Other tiles that can give light
           for kind_strength : LIGHT_SOURCE_KINDS {
@@ -1261,7 +1330,7 @@ render_ui_system :: () {
 
       if game_state.modifying_loop_index {
         // List all available characters to choose from
-        for 0..CharacterType.DIGGER {
+        for 0..CharacterType.WIZARD {
           cell := *buffer[5+CYCLE_START_X+it][CYCLE_Y];
           cell.glyph = CHARACTER_GLYPHS[it].(int);
           cell.fg = PLAYER_COLOR;

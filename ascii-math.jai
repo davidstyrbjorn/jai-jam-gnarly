@@ -1,11 +1,12 @@
 
-CHARACTER_GLYPHS :: GLYPH.[.SWIPER, .TINKERER, .MARTYR, .DIGGER]; // Order matters
+CHARACTER_GLYPHS :: GLYPH.[.SWIPER, .TINKERER, .MARTYR, .DIGGER, .WIZARD]; // Order matters
 
 GLYPH :: enum int {
   SWIPER :: 115;
   TINKERER :: 116;
   MARTYR :: 109;
   DIGGER :: 100;
+  WIZARD :: "w"[0];
 }
 
 Node :: struct {
