@@ -1206,6 +1206,8 @@ print_currently_selected_segment :: () {
           print("%", to_string(*laser_direction_to_glyph(e.laser_direction), 1));
         case .COIN;
           print("$");
+        case .VISION;
+          print("V");
         case;
           print("_");
       }

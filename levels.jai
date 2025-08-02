@@ -118,6 +118,7 @@ character_and_spawner :: struct{
   .{ "<"[0].(u8), create_left_laser },
   .{ "^"[0].(u8), create_up_laser },
   .{ "v"[0].(u8), create_down_laser },
+  .{ "V"[0].(u8), create_vision },
 ];
 
 exists_as_spawner :: (c: u8) -> bool {
@@ -177,8 +178,5 @@ segments: []SegmentSelection = .[
   .{.[true, true, false, false], BOTTOM_LEFT },
   .{.[true, false, false, true], BOTTOM_RIGHT },
 ];
-
-test :: () {
-}
 
 #load "segments.jai";
