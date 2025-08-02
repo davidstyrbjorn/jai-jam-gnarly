@@ -44,24 +44,24 @@ generate_walled_segment :: (up_gap: bool, right_gap: bool, down_gap: bool, left_
     }
 }
 
-#run {
-  GAP_SIZE :: 4;
-  print("BOTTOM_LEFT\n");
-  generate_walled_segment(true, true, false, false, GAP_SIZE);
-  print("DONE\n");
+// #run {
+//   GAP_SIZE :: 4;
+//   print("BOTTOM_LEFT\n");
+//   generate_walled_segment(true, true, false, false, GAP_SIZE);
+//   print("DONE\n");
 
-  print("BOTTOM_RIGHT\n");
-  generate_walled_segment(true, false, false, true, GAP_SIZE);
-  print("DONE\n");
+//   print("BOTTOM_RIGHT\n");
+//   generate_walled_segment(true, false, false, true, GAP_SIZE);
+//   print("DONE\n");
 
-  print("TOP_RIGHT\n");
-  generate_walled_segment(false, false, true, true, GAP_SIZE);
-  print("DONE\n");
+//   print("TOP_RIGHT\n");
+//   generate_walled_segment(false, false, true, true, GAP_SIZE);
+//   print("DONE\n");
 
-  print("TOP LEFT\n");
-  generate_walled_segment(false, true, true, false, GAP_SIZE);
-  print("DONE\n");
-}
+//   print("TOP LEFT\n");
+//   generate_walled_segment(false, true, true, false, GAP_SIZE);
+//   print("DONE\n");
+// }
 
 create_level :: () {
   pick_random_segment :: (prefabs: []string) -> string {
