@@ -1,5 +1,12 @@
 
 CHARACTER_GLYPHS :: GLYPH.[.SWIPER, .TINKERER, .MARTYR, .DIGGER, .WIZARD]; // Order matters
+CHARACTER_COLORS :: rl.Color.[
+  #run color(215, 38, 56),
+  #run color(63, 136, 197),
+  #run color(244, 157, 55),
+  #run color(150, 75, 0),
+  #run color(106, 49, 144),
+];
 
 GLYPH :: enum int {
   SWIPER :: 115;

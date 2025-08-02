@@ -12,10 +12,16 @@ UI_START_Y :: GAME_AREA_SIZE; // 43, UI starts right after the game area
 tile_w: s16 = 20;
 tile_h: s16 = 20;
 
-PLAYER_COLOR :: rl.Color.{ 255, 0, 255, 255 };
 GOAL_COLOR :: rl.Color.{ 255, 215, 0, 255 };
 
 STANDING_ON_WALL_BG :: rl.Color.{ 100, 100, 100, 100 };
+
+Level_Goal :: enum {
+  REACH_END :: 0;
+  REACH_END_WITH :: 1;
+  KILL_ALL_ENEMIES :: 2;
+  COLLECT_COINS :: 3;
+}
 
 LIGHT_SOURCE_KINDS :: struct{
   kind: Entity_Kind;
@@ -48,7 +54,11 @@ GameState :: struct {
 
   loop: [4]CharacterType;
   current_loop_idx: int = 0;
-  iterations: int = 0;
+  loops: int = 0;
+  floors_cleared: int = 0;
+
+  light_t: float;
+  player_light_str: s16 = 12;
 
   shake_duration: float = 0.0;
   shake_intensity: float = 0.0;
@@ -57,6 +67,9 @@ GameState :: struct {
   spawn_level_flag: bool = false;
 
   transition_out: bool;
+
+  level_goal: Level_Goal = .REACH_END; 
+  reach_end_with: CharacterType;
 
   state: State = .MENU;
 }
@@ -104,10 +117,14 @@ PlayerMove :: struct {
   player: *Entity;
 }
 
+LightUpdate :: struct {}
 PlayerDied :: struct {}
 FireballMove :: struct { _: bool; }
+PlayerPerformedAction :: struct { _: u8; }
+LevelCompleted :: struct {}
+EnemyKilled :: struct {}
 
-Command :: Tagged_Union(PlayerMove, PlayerDied, FireballMove);
+Command :: Tagged_Union(PlayerMove, PlayerDied, FireballMove, PlayerPerformedAction, LevelCompleted, EnemyKilled);
 
 EntityWorld :: struct {
   entities: [..]Entity;   
@@ -169,7 +186,7 @@ Entity :: struct {
   fireball_t: float;
 }
 
-NUM_ENTITY_KIND :: 12;
+NUM_ENTITY_KIND :: 13;
 Entity_Kind :: enum u32 {
   PLAYER;
   ENEMY; 
@@ -183,6 +200,7 @@ Entity_Kind :: enum u32 {
   GOAL; 
   LASER;
   FIREBALL;
+  COIN;
 }
 
 entity_world_init :: (world: *EntityWorld) {
@@ -259,7 +277,6 @@ entity_world_rebuild :: (world: *EntityWorld) {
   for *world.entities {
     array_add(*world.entity_groups[it.kind], it);
   }
-
 
   Table.table_reset(*world.cached_id_to_index);
   for i : 0..world.entities.count-1 {
@@ -351,11 +368,48 @@ create_goal :: (pos: SVector) {
   goal.kind = .GOAL;
   goal.pos = pos;
   goal.color = GOAL_COLOR;
+  goal.color.a = 0;
   goal.glyph = 88;
 
   goal.update_proc = goal_update;
 
   entity_world_add(*world, goal);
+}
+
+create_coin :: (pos: SVector) {
+  coin_render :: (coin: *Entity) {
+    cell := *buffer[coin.pos.x][coin.pos.y];
+    cell.bg = color(233, 173, 3, cell.bg.a);
+  }
+
+  coin_update :: (coin: *Entity, dt: float) {
+    for world.commands {
+      if isa(it, PlayerMove) {
+        player := world.entity_groups[Entity_Kind.PLAYER][0];
+        if player.pos == coin.pos {
+          // pickup le coin, self immolate
+          trigger_screen_shake(2, 0.4);
+          entity_world_remove(*world, coin.id);
+          entity_world_rebuild(*world);
+
+          if world.entity_groups[Entity_Kind.COIN].count == 0 {
+            level_completed(player.pos);
+          }
+        }
+      }
+    }
+  }
+  
+  coin: Entity;
+  coin.kind = .COIN;
+  coin.pos = pos;
+  coin.glyph = "$"[0];
+  coin.color = color(233,173,3);
+
+  coin.update_proc = coin_update;
+  coin.render_proc = coin_render;
+
+  entity_world_add(*world, coin);
 }
 
 create_wall :: (pos: SVector) {
@@ -458,7 +512,8 @@ create_laser :: (pos: SVector, dir: SVector) {
 
     for world.commands {
       player_move := isa(it, PlayerMove);
-      if player_move {
+      performed_action := isa(it, PlayerPerformedAction);
+      if player_move || performed_action {
         laser.laser_state += 1;
         if laser.laser_state == .LOOP_BACK then laser.laser_state = .OFF;
       }
@@ -583,7 +638,7 @@ create_dead_martyr :: (pos: SVector) {
   dead_martyr.kind = .DEAD_MARTYR;
 
   dead_martyr.pos = pos;
-  dead_martyr.color = PLAYER_COLOR;
+  dead_martyr.color = CHARACTER_COLORS[CharacterType.MARTYR];
   dead_martyr.alpha_modifier = 0.25;
   dead_martyr.glyph = GLYPH.MARTYR.(int);
 
@@ -641,12 +696,16 @@ create_enemy :: (pos: SVector) {
       return;
     }
 
+    enemy.alpha_modifier = 1.0;
     // Check if enemy is inside the beam of a laser
     for laser : world.entity_groups[Entity_Kind.LASER] {
       if laser.laser_state == .ON || laser.laser_state == .ON2 {
         for pos : get_laser_path(laser) {
           if pos == enemy.pos {
             entity_world_remove(*world, enemy.id);
+            cmd: Command;
+            set(*cmd, EnemyKilled.{});
+            entity_world_push_command(*world, cmd);
             trigger_screen_shake(2, 1);
             break;
           }
@@ -660,6 +719,9 @@ create_enemy :: (pos: SVector) {
         create_fire(enemy.pos);
         entity_world_remove(*world, enemy.id);
         entity_world_remove(*world, fireball.id);
+        cmd: Command;
+        set(*cmd, EnemyKilled.{});
+        entity_world_push_command(*world, cmd);
         trigger_screen_shake(2, 1);
         break;
       }
@@ -667,13 +729,15 @@ create_enemy :: (pos: SVector) {
 
     for world.commands {
       player_move := isa(it, PlayerMove);
-      if player_move {
+      performed_action := isa(it, PlayerPerformedAction);
+      if player_move || performed_action {
+        player := world.entity_groups[Entity_Kind.PLAYER][0];
         // The enemy doesn't react to the swiper character
-        if player_move.player.character_type == .SWIPER {
+        if player_move && player.character_type == .SWIPER {
           return;
         }
 
-        sees_player, t := has_line_of_sight(enemy, player_move.player, 8);
+        sees_player, t := has_line_of_sight(enemy, player, 8);
         if sees_player {
           enemy.color = color(255, 20, 50, enemy.color.a);
         } else {
@@ -682,14 +746,14 @@ create_enemy :: (pos: SVector) {
 
         // Move?
         enemy.move_tick += 1;
-        if enemy.move_tick % 2 == 0 && has_line_of_sight(enemy, player_move.player, 8) {
+        if enemy.move_tick % 2 == 0 && has_line_of_sight(enemy, player, 8) {
           // Check if we're neighbouring to the player, if so lets go ahead and kill them 
-          if is_direct_neighbour(player_move.new_pos, enemy.pos) {
+          if is_direct_neighbour(player.pos, enemy.pos) {
             cmd: Command;
             set(*cmd, PlayerDied.{});
             entity_world_push_command(*world, cmd);
           }else {
-            move_enemy_towards_player(player_move.player, enemy);
+            move_enemy_towards_player(player, enemy);
           }
         }
       }
@@ -759,7 +823,7 @@ create_player :: () {
     // Check for wall
     walkable, kind := is_walkable(new_pos);
     if kind == .KILL_TILE {
-      // Mechanic "Martyrs can cover up KILL TILES"
+      // @MECHANIC "Martyrs can cover up KILL TILES"
       if player.character_type == .MARTYR  {
         entity_world_remove(*world, find_entity_at(new_pos).id);
         create_dead_martyr(new_pos);
@@ -771,24 +835,38 @@ create_player :: () {
       return false;
     }
     if kind == .FIRE && player.character_type != .SWIPER {
+      // @MECHANIC: Fire kills player unless you are a swiper
       command: Command;
       set(*command, PlayerDied.{});
       entity_world_push_command(*world, command); 
       return false;
     }
     if player.character_type == .SWIPER && kind == .ENEMY {
-      // Yo! The swiper has moved into an enemy, kill it and kill the player
+      // @MECHANIC: Swiper can kill enemies by moving through them
       entity_world_remove(*world, find_entity_at(new_pos).id);
       player.swiping_dir = xy(0, 0);
       player.swipe_counter = 0.0;
+      
+      cmd: Command;
+      set(*cmd, EnemyKilled.{});
+      entity_world_push_command(*world, cmd);
+      
       trigger_screen_shake(2, 1);
       return false;
     }
     if player.character_type == .TINKERER && kind == .LEVER {
+      // @MECHANIC: tinkerer can use lever to open door
       open_closest_door(new_pos);
     }
     if player.character_type == .DIGGER && kind == .DIGGABLE {
+      // @MECHANIC: digger can walk into diggable tiles to remove them
       entity_world_remove(*world, find_entity_at(new_pos).id);
+    }
+    if kind == .GOAL && game_state.level_goal == .REACH_END_WITH {
+      if player.character_type != game_state.reach_end_with {
+        trigger_screen_shake(2, 0.4);
+        return false;
+      } 
     }
     
     if (!game_state.edit_mode && !walkable) || !is_valid(new_pos) || kind == .ENEMY then return false;
@@ -818,6 +896,7 @@ create_player :: () {
   update_player :: (player: *Entity, dt: float) {
     player.character_type = game_state.loop[game_state.current_loop_idx];
     player.glyph = CHARACTER_GLYPHS[player.character_type].(int);
+    player.color = CHARACTER_COLORS[player.character_type];
 
     if game_state.state == .PICKING_LOOP {
       // This is a godamn shitshow... UI!!!
@@ -888,10 +967,16 @@ create_player :: () {
           if player.character_type == .TINKERER && player.action_prepped {
             tinkerer_place_wall(player.pos + input);
             player.action_prepped = false;
+            cmd: Command;
+            set(*cmd, PlayerPerformedAction.{0});
+            entity_world_push_command(*world, cmd);
           }
           else if player.character_type == .WIZARD && player.action_prepped {
             create_fireball(player.pos + input, input);
             player.action_prepped = false;
+            cmd: Command;
+            set(*cmd, PlayerPerformedAction.{1});
+            entity_world_push_command(*world, cmd);
           } else {
             move_player(player, input);
           }
@@ -941,7 +1026,7 @@ create_player :: () {
         if isa(it, PlayerDied) {
           game_state.current_loop_idx = (game_state.current_loop_idx+1) % game_state.loop.count;
           player.action_prepped = false;
-          game_state.iterations += 1;
+          game_state.loops += 1;
           trigger_screen_shake(2, 0.5);
           set_player_pos(player, 1, 1);
         }
@@ -960,7 +1045,7 @@ create_player :: () {
 
   render_player :: (player: *Entity) {
     player_cell := *buffer[player.pos.x][player.pos.y];
-    player_cell.fg = PLAYER_COLOR;
+    player_cell.fg = player.color;
     if game_state.state == .MENU || game_state.state == .TRANSITION {
       player_cell.fg.a = 0;
     }
@@ -995,7 +1080,7 @@ get_segment_start :: (point: SVector) -> SVector {
 print_currently_selected_segment :: () {
   segment_offset := get_segment_start(game_state.selected_point);
   
-  print("BEGIN LEVEL");
+  print("BEGIN LEVEL\n");
 
   for y: segment_offset.y..segment_offset.y+SEGMENT_SIZE-1 {
     for x: segment_offset.x..segment_offset.x+SEGMENT_SIZE-1 {
@@ -1023,6 +1108,8 @@ print_currently_selected_segment :: () {
           print("G");
         case .LASER;
           print("%", to_string(*laser_direction_to_glyph(e.laser_direction), 1));
+        case .COIN;
+          print("$");
         case;
           print("_");
       }
@@ -1201,6 +1288,10 @@ edit_system :: (dt: float) {
         create_laser(game_state.selected_point, xy(1, 0));
         game_state.selected_point.x = -1;
       }
+      if rl.GuiButton(rl.Rectangle.{100*1, height-80, 90, 30}, "COIN") {
+        create_coin(game_state.selected_point);
+        game_state.selected_point.x = -1;
+      }
     }
   }
 }
@@ -1216,7 +1307,7 @@ glyph_basic_render_system :: () {
       if game_state.edit_mode {
         cell.fg.a = 255;
       }
-      
+
       cell.glyph = it.glyph;
     }
   }
@@ -1243,31 +1334,39 @@ glyph_basic_render_system :: () {
 }
 
 is_basic_rendered :: (kind: Entity_Kind) -> bool {
-  return kind == .WALL || kind == .ENEMY || kind == .KILL_TILE || kind == .DOOR || kind == .LEVER || kind == .DEAD_MARTYR || kind == .DIGGABLE || kind == .GOAL;
+  return kind == .WALL || kind == .ENEMY || kind == .KILL_TILE || kind == .DOOR || kind == .LEVER || kind == .DEAD_MARTYR || kind == .DIGGABLE || kind == .GOAL || kind == .COIN;
 }
 
 glyph_basic_update_system :: (dt: float) {
-  player := world.entity_groups[Entity_Kind.PLAYER][0];
+
+  calculate_alpha :: (color: *rl.Color, pos: SVector, alpha_modifier: float) {
+    player := world.entity_groups[Entity_Kind.PLAYER][0];
+    // Basisc player litness
+    color.a = get_lit_alpha(player.pos, pos, game_state.player_light_str);
+
+    // Other tiles that can give light
+    for kind_strength : LIGHT_SOURCE_KINDS {
+      for source : world.entity_groups[kind_strength.kind] {
+        new_alpha := color.a.(u64) + get_lit_alpha(source.pos, pos, kind_strength.strength).(u64);
+        max_alpha: u64 = 255;
+        new_alpha = min(max_alpha, new_alpha);
+        color.a = new_alpha.(u8);
+      }
+    }
+    color.a = (color.a * alpha_modifier).(u8);
+  }
+
   for cmd : world.commands {
     player_move := isa(cmd, PlayerMove);
     fireball_move := isa(cmd, FireballMove);
-    if player_move || fireball_move {
+    light_update := isa(cmd, LightUpdate);
+    if player_move || fireball_move || light_update {
       for *world.entities {
         if is_basic_rendered(it.kind) {
-          // Basisc player litness
-          it.color.a = get_lit_alpha(player.pos, it.pos, 12);
-
-          // Other tiles that can give light
-          for kind_strength : LIGHT_SOURCE_KINDS {
-            for source : world.entity_groups[kind_strength.kind] {
-              new_alpha := it.color.a.(u64) + get_lit_alpha(source.pos, it.pos, kind_strength.strength).(u64);
-              max_alpha: u64 = 255;
-              new_alpha = min(max_alpha, new_alpha);
-              it.color.a = new_alpha.(u8);
-            }
+          calculate_alpha(*it.color, it.pos, it.alpha_modifier);
+          if it.kind == .COIN {
+            calculate_alpha(*it.background, it.pos, 0.5);
           }
-
-          it.color.a = (it.color.a * it.alpha_modifier).(u8);
         }
       }
     }
@@ -1311,7 +1410,7 @@ render_ui_system :: () {
     for 0..3 {
       cell = *buffer[CYCLE_START_X+it][CYCLE_Y];
       cell.glyph = CHARACTER_GLYPHS[game_state.loop[it]].(int);
-      cell.fg = PLAYER_COLOR;
+      cell.fg = CHARACTER_COLORS[game_state.loop[it]];
       cell.bg = rl.GRAY;
 
       if game_state.state == .PICKING_LOOP && game_state.editing_loop_index == it && !game_state.on_back_button {
@@ -1323,18 +1422,34 @@ render_ui_system :: () {
 
     if game_state.state == .PLAYING {
       draw_string(CYCLE_START_X, CYCLE_Y-2, "R=next");
-      iterations_str := tprint("loops=%", game_state.iterations);
-      draw_string(CYCLE_START_X, CYCLE_Y+2, iterations_str);
+      draw_string(CYCLE_START_X, CYCLE_Y-2, "Y=give up");
+      
+      loops_str := tprint("loops=%", game_state.loops);
+      draw_string(CYCLE_START_X, CYCLE_Y+2, loops_str);
+
+      floors_cleared_str := tprint("floor=%", game_state.floors_cleared+1);
+      draw_string(CYCLE_START_X+8, CYCLE_Y+2, floors_cleared_str);
+
+      flavor := get_goal_flavor_text();
+      draw_string(CYCLE_START_X, CYCLE_Y+3, flavor);
     } else if game_state.state == .PICKING_LOOP {
-      draw_string(CYCLE_START_X, CYCLE_Y-2, "MOD YOUR LOOP");
+      mod_your_loop :: "MOD YOUR LOOP";
+      draw_string(CYCLE_START_X, CYCLE_Y-2, mod_your_loop);
+      // TODO: 
+      // for x: CYCLE_START_X..CYCLE_START_X + mod_your_loop.count {
+      //   cell := *buffer[x][CYCLE_Y-2];
+      //   cell.shake = true;
+      // }
       draw_string(CYCLE_START_X, CYCLE_Y+1, "DONE", ifx game_state.on_back_button then rl.ColorAlpha(rl.GRAY, 100) else rl.BLANK);
 
       if game_state.modifying_loop_index {
+        draw_string(5+CYCLE_START_X, CYCLE_Y-1, "SWAP TO");
+
         // List all available characters to choose from
         for 0..CharacterType.WIZARD {
           cell := *buffer[5+CYCLE_START_X+it][CYCLE_Y];
           cell.glyph = CHARACTER_GLYPHS[it].(int);
-          cell.fg = PLAYER_COLOR;
+          cell.fg = CHARACTER_COLORS[it];
           cell.bg = rl.GRAY;
 
           if game_state.desired_character_type == it {
@@ -1353,18 +1468,90 @@ render_ui_system :: () {
   }
 }
 
+pick_character_to_end_with :: () {
+  POSSIBLE_EXIT_CHARACTERS :: CharacterType.[ .SWIPER, .TINKERER, .DIGGER, .WIZARD ];
+  while true {
+    maybe_character := POSSIBLE_EXIT_CHARACTERS[random_get() % POSSIBLE_EXIT_CHARACTERS.count.(u64)];
+    for game_state.loop {
+      if it == maybe_character {
+        game_state.reach_end_with = maybe_character;
+        return;
+      }
+    }
+  }
+}
+
+spawn_coins :: () {
+  spawned_coins := 0;
+  for potential_coin_positions {
+    CHANCE_FOR_COIN :: 0.3;
+    if random_get_zero_to_one() < CHANCE_FOR_COIN {
+      create_coin(it);
+      spawned_coins += 1;
+    }
+  }
+
+  // Because, we only spawn coins when its a coin collect goal, and in that case we MUST ensure there is atlest ONE coin on the map
+  if spawned_coins == 0 {
+    pos := potential_coin_positions[random_get() & potential_coin_positions.count.(u64)];
+    create_coin(pos);
+  }
+}
+
+get_goal_flavor_text :: () -> string {
+  if game_state.level_goal == {
+    case .REACH_END;
+      return "Reach end";
+    case .REACH_END_WITH;
+      return tprint("Reach end with %", CHARACTER_GLYPHS[game_state.reach_end_with]);
+    case .KILL_ALL_ENEMIES;
+      return "Enemies lurking...";
+    case .COLLECT_COINS;
+      return "Find treasures...";
+    case;
+      return "???";
+  }
+}
+
 level_completed :: (from_pos: SVector) {
   game_state.state = .TRANSITION;
   game_state.transition_t = 0.0;
   game_state.transition_origin = xy(from_pos.x.(float), from_pos.y.(float));
   game_state.transition_out = true;
   game_state.spawn_level_flag = false;
+  game_state.floors_cleared += 1;
   for y : 0..ROWS-1 {
     for x : 0..COLS-1 {
       cell := *buffer[x][y];
       cell.override_flag = false;
       cell.prev_override_flag = false;
     }
+  }
+
+  cmd: Command;
+  set(*cmd, LevelCompleted.{});
+  entity_world_push_command(*world, cmd);
+
+  // Because if we just completed a level with these goals, we know there is a goal and we can remove it
+  if game_state.level_goal == .REACH_END || game_state.level_goal == .REACH_END_WITH {
+    goal := world.entity_groups[Entity_Kind.GOAL][0];
+    entity_world_remove(*world, goal.id);
+  }
+
+  // Always remove all coins from the map
+  for coin : world.entity_groups[Entity_Kind.COIN] {
+    entity_world_remove(*world, coin.id);
+  }
+
+  game_state.level_goal = (game_state.level_goal + 1) % (Level_Goal.COLLECT_COINS + 1);
+  if game_state.level_goal == {
+    case .REACH_END;
+      create_goal(potential_goal_positions[random_get() % potential_goal_positions.count.(u64)]);
+    case .REACH_END_WITH;
+      create_goal(potential_goal_positions[random_get() % potential_goal_positions.count.(u64)]);
+      pick_character_to_end_with();
+    case .COLLECT_COINS;
+      spawn_coins();
   }
 }
 
@@ -1402,6 +1589,36 @@ transition_system :: (dt: float) {
         cell.override_flag = false;
         cell.prev_override_flag = false;
       }
+    }
+  }
+}
+
+update_player_light_system :: (dt: float) {
+  move_number_towards :: (curr: s16, goal: s16) -> s16 {
+    if curr < goal {
+      return curr + 1;
+    }else {
+      return curr - 1;
+    }
+  }
+  
+  if game_state.state == .PICKING_LOOP && game_state.player_light_str != COLS*4 {
+    game_state.light_t += dt;
+    if game_state.light_t > 0.02 {
+      game_state.light_t = 0;
+      game_state.player_light_str = move_number_towards(game_state.player_light_str, COLS*2); 
+      cmd: Command;
+      set(*cmd, LightUpdate.{});
+      entity_world_push_command(*world, cmd);
+    }
+  }else if game_state.state == .PLAYING && game_state.player_light_str != 12 {
+    game_state.light_t += dt;
+    if game_state.light_t > 0.02 {
+      game_state.light_t = 0;
+      game_state.player_light_str = move_number_towards(game_state.player_light_str, 12); 
+      cmd: Command;
+      set(*cmd, LightUpdate.{});
+      entity_world_push_command(*world, cmd);
     }
   }
 }
@@ -1472,6 +1689,51 @@ menu_system :: (dt: float) {
   }
 }
 
+level_complete_system :: (dt: float) {
+  for world.commands {
+    if isa(it, LevelCompleted) {
+      for *world.entities {
+        if it.kind == {
+          case .DOOR;
+            it.door_open = false;
+          case .ENEMY;
+            it.pos = it.spawn_pos;
+        }
+      }
+
+      // Loop thruogh and dice roll new enemies
+      for potetial_enemy_positions {
+        occupied := false;
+        for enemy : world.entity_groups[Entity_Kind.ENEMY] {
+          if enemy.pos == it {
+            occupied = true;
+            break;
+          }
+        }
+        if !occupied {
+          if random_get_zero_to_one() < CHANCE_OF_ENEMY {
+           create_enemy(it);
+          }
+        }
+      }
+      
+      entity_world_rebuild(*world);
+      // Because if we are on KILL_ALL_ENEMIES goal, we need to ensure there is atleast ONE enemy on the map 
+      if game_state.level_goal == .KILL_ALL_ENEMIES && world.entity_groups[Entity_Kind.ENEMY].count == 0 {
+        pos := potetial_enemy_positions[random_get() % potetial_enemy_positions.count.(u64)];
+        create_enemy(pos);
+      }
+    }
+    else if isa(it, EnemyKilled) {
+      enemies_left := world.entity_groups[Entity_Kind.ENEMY].count;
+      if game_state.level_goal == .KILL_ALL_ENEMIES && enemies_left == 0 {
+        player := world.entity_groups[Entity_Kind.PLAYER][0];
+        level_completed(player.pos);
+      }
+    }
+  }
+}
+
 main :: () {
   apollot_time := current_time_consensus();
   random_seed(to_calendar(apollot_time).millisecond.(u64));
@@ -1486,6 +1748,8 @@ main :: () {
   array_add(*world.render_systems, glyph_basic_render_system);
   array_add(*world.render_systems, render_ui_system);
   array_add(*world.update_systems, menu_system);
+  array_add(*world.update_systems, update_player_light_system);
+  array_add(*world.update_systems, level_complete_system);
 
   array_add(*world.update_systems, transition_system);
   array_add(*world.render_systems, transition_render_system);
