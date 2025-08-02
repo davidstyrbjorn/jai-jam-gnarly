@@ -657,6 +657,7 @@ create_enemy :: (pos: SVector) {
     // Check if we're hit by a fireball
     for fireball : world.entity_groups[Entity_Kind.FIREBALL] {
       if fireball.pos == enemy.pos {
+        create_fire(enemy.pos);
         entity_world_remove(*world, enemy.id);
         entity_world_remove(*world, fireball.id);
         trigger_screen_shake(2, 1);
