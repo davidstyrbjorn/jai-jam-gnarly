@@ -18,9 +18,9 @@ STANDING_ON_WALL_BG :: rl.Color.{ 100, 100, 100, 100 };
 
 Level_Goal :: enum {
   REACH_END :: 0;
-  REACH_END_WITH :: 1;
-  KILL_ALL_ENEMIES :: 2;
-  COLLECT_COINS :: 3;
+  COLLECT_COINS :: 1;
+  REACH_END_WITH :: 2;
+  KILL_ALL_ENEMIES :: 3;
 }
 
 LIGHT_SOURCE_KINDS :: struct{
@@ -39,6 +39,7 @@ State :: enum {
   PLAYING;
   PICKING_LOOP;
   MENU;
+  GIVEN_UP;
 }
 
 GameState :: struct {
@@ -53,6 +54,7 @@ GameState :: struct {
   on_back_button: bool = false;
 
   loop: [4]CharacterType;
+  loop_locked: [4]bool;
   current_loop_idx: int = 0;
   loops: int = 0;
   floors_cleared: int = 0;
@@ -67,6 +69,8 @@ GameState :: struct {
   spawn_level_flag: bool = false;
 
   transition_out: bool;
+
+  standing_on_vision: bool = false;
 
   level_goal: Level_Goal = .REACH_END; 
   reach_end_with: CharacterType;
@@ -186,7 +190,7 @@ Entity :: struct {
   fireball_t: float;
 }
 
-NUM_ENTITY_KIND :: 13;
+NUM_ENTITY_KIND :: 14;
 Entity_Kind :: enum u32 {
   PLAYER;
   ENEMY; 
@@ -201,6 +205,7 @@ Entity_Kind :: enum u32 {
   LASER;
   FIREBALL;
   COIN;
+  VISION;
 }
 
 entity_world_init :: (world: *EntityWorld) {
@@ -409,6 +414,12 @@ create_coin :: (pos: SVector) {
   coin.update_proc = coin_update;
   coin.render_proc = coin_render;
 
+  // Remove existing entity on this spot
+  existing_entity := find_entity_at(pos);
+  if existing_entity != null {
+    entity_world_remove(*world, existing_entity.id);
+  }
+
   entity_world_add(*world, coin);
 }
 
@@ -422,6 +433,17 @@ create_wall :: (pos: SVector) {
   wall.glyph = 35;
 
   entity_world_add(*world, wall);
+}
+
+create_vision :: (pos: SVector) {
+  vision: Entity;
+
+  vision.kind = .VISION;
+  vision.pos = pos;
+  vision.color = color(0,158,96);
+  vision.glyph = "V"[0];
+
+  entity_world_add(*world, vision);
 }
 
 laser_direction_to_glyph :: (dir: SVector) -> u8 {
@@ -771,6 +793,12 @@ create_enemy :: (pos: SVector) {
   enemy.color = color(90, 90, 90, 255);
   enemy.glyph = 69;
 
+  // Remove existing entity on this spot
+  existing_entity := find_entity_at(pos);
+  if existing_entity != null {
+    entity_world_remove(*world, existing_entity.id);
+  }
+
   entity_world_add(*world, enemy);
 }
 
@@ -806,6 +834,13 @@ tinkerer_place_wall :: (at: SVector) {
   }
 
   create_wall(at);
+}
+
+find_entity_of_kind_at :: (kind: Entity_Kind, pos: SVector) -> *Entity {
+  for world.entity_groups[kind] {
+    if it.pos == pos return it;
+  }
+  return null;
 }
 
 create_player :: () {
@@ -854,14 +889,6 @@ create_player :: () {
       trigger_screen_shake(2, 1);
       return false;
     }
-    if player.character_type == .TINKERER && kind == .LEVER {
-      // @MECHANIC: tinkerer can use lever to open door
-      open_closest_door(new_pos);
-    }
-    if player.character_type == .DIGGER && kind == .DIGGABLE {
-      // @MECHANIC: digger can walk into diggable tiles to remove them
-      entity_world_remove(*world, find_entity_at(new_pos).id);
-    }
     if kind == .GOAL && game_state.level_goal == .REACH_END_WITH {
       if player.character_type != game_state.reach_end_with {
         trigger_screen_shake(2, 0.4);
@@ -885,13 +912,47 @@ create_player :: () {
     return entity.kind == .ENEMY; // TODO:
   }
 
-  martyr_explode :: () {
-    for x: -1..1 {
-      for y: -1..1 {
-        // TODO: Remove explodable tiles
-      }
+
+  EXPLODABLE_KINDS :: Entity_Kind.[ .ENEMY, .WALL, .KILL_TILE, .FIRE, .DIGGABLE ];
+  EXPLODE_RADIUS: s16 : 2;
+  martyr_explode :: (origin: SVector) {
+    // 1. Create a temporary list to hold the IDs of entities to remove.
+    ids_to_remove: [..]u32;
+    ids_to_remove.allocator = temp; // Use temporary storage
+
+    // Find all entities within the radius that should be exploded.
+    for y: -EXPLODE_RADIUS..EXPLODE_RADIUS {
+        for x: -EXPLODE_RADIUS..EXPLODE_RADIUS {
+            pos := origin + xy(x, y);
+
+            if !is_valid(pos) continue;
+
+            // Find an entity at this position.
+            maybe_e := find_entity_at(pos);
+            if maybe_e {
+                // Check if its kind is in our list of explodable types.
+                for kind_to_check : EXPLODABLE_KINDS {
+                    if maybe_e.kind == kind_to_check {
+                        // 2. Instead of removing, add its ID to our list.
+                        array_add(*ids_to_remove, maybe_e.id);
+                        break; // Found a match, no need to check other kinds for this entity.
+                    }
+                }
+            }
+        }
     }
+    
+    // 3. Now, safely remove all collected entities.
+    for id : ids_to_remove {
+        entity_world_remove(*world, id);
+        entity_world_rebuild(*world);
+    }
+
+    // A single rebuild after all removals are done.
+    if ids_to_remove.count > 0 {
+    } 
   }
+
  
   update_player :: (player: *Entity, dt: float) {
     player.character_type = game_state.loop[game_state.current_loop_idx];
@@ -965,11 +1026,20 @@ create_player :: () {
         if rl.IsKeyPressed(.KEY_W) input = xy(0, -1);
         if !is_zero(input) {
           if player.character_type == .TINKERER && player.action_prepped {
-            tinkerer_place_wall(player.pos + input);
+            // @Mechanic TINKERER can pull lever
+            maybe_lever := find_entity_of_kind_at(Entity_Kind.LEVER, player.pos + input);
+            if maybe_lever {
+              open_closest_door(maybe_lever.pos);
+              cmd: Command;
+              set(*cmd, PlayerPerformedAction.{0});
+              entity_world_push_command(*world, cmd);
+            }else {
+              tinkerer_place_wall(player.pos + input);
+              cmd: Command;
+              set(*cmd, PlayerPerformedAction.{0});
+              entity_world_push_command(*world, cmd);
+            }
             player.action_prepped = false;
-            cmd: Command;
-            set(*cmd, PlayerPerformedAction.{0});
-            entity_world_push_command(*world, cmd);
           }
           else if player.character_type == .WIZARD && player.action_prepped {
             create_fireball(player.pos + input, input);
@@ -977,13 +1047,41 @@ create_player :: () {
             cmd: Command;
             set(*cmd, PlayerPerformedAction.{1});
             entity_world_push_command(*world, cmd);
+          } else if player.character_type == .DIGGER && player.action_prepped {
+            maybe_wall := find_entity_of_kind_at(Entity_Kind.DIGGABLE, player.pos + input);
+            if maybe_wall {
+              entity_world_remove(*world, maybe_wall.id);
+              cmd: Command;
+              set(*cmd, PlayerPerformedAction.{1});
+              entity_world_push_command(*world, cmd);
+            }
+            player.action_prepped = false;
           } else {
             move_player(player, input);
           }
         }
 
-        if rl.IsKeyPressed(.KEY_SPACE) && (player.character_type == .TINKERER || player.character_type == .WIZARD) {
+        for vision : world.entity_groups[Entity_Kind.VISION] {
+          if vision.pos == player.pos {
+            game_state.standing_on_vision = true;
+            break;
+          }
+          game_state.standing_on_vision = false;
+        }
+
+        if rl.IsKeyPressed(.KEY_SPACE) && (player.character_type == .TINKERER || player.character_type == .WIZARD || player.character_type == .DIGGER) {
           player.action_prepped = !player.action_prepped;
+        }
+        if rl.IsKeyPressed(.KEY_SPACE) && player.character_type == .MARTYR {
+          martyr_explode(player.pos);
+          cmd: Command;
+          set(*cmd, PlayerDied.{});
+          entity_world_push_command(*world, cmd);
+          game_state.loop_locked[game_state.current_loop_idx] = true;
+        }
+
+        if rl.IsKeyPressed(.KEY_Y) {
+          game_state.state = .GIVEN_UP;
         }
 
         // Check if we're standing in the path of a laser
@@ -1004,9 +1102,6 @@ create_player :: () {
         cell := *buffer[player.pos.x][player.pos.y];
         cell.shake = player.action_prepped;
 
-        if rl.IsKeyPressed(.KEY_SPACE) && player.character_type == .MARTYR {
-          martyr_explode();
-        }
       }
 
       if rl.IsKeyPressed(.KEY_R) {
@@ -1025,6 +1120,7 @@ create_player :: () {
       for world.commands {
         if isa(it, PlayerDied) {
           game_state.current_loop_idx = (game_state.current_loop_idx+1) % game_state.loop.count;
+          while game_state.loop_locked[game_state.current_loop_idx] game_state.current_loop_idx = (game_state.current_loop_idx+1) % game_state.loop.count;
           player.action_prepped = false;
           game_state.loops += 1;
           trigger_screen_shake(2, 0.5);
@@ -1147,6 +1243,76 @@ find_entity_at :: (pos: SVector) -> *Entity {
   return null;
 }
 
+flood_fill_walls :: (pos: SVector) {
+    // First, check if the starting point is valid and empty.
+    // We can't start a fill on a tile that's already occupied.
+    if !is_valid(pos) || find_entity_at(pos) != null {
+        return;
+    }
+
+    // A queue to hold the coordinates of tiles we need to visit.
+    queue: [..]SVector;
+    compare_s_vector :: (a: SVector, b: SVector) -> bool {
+      return a == b;
+    }
+    hash :: (v: SVector) -> u32 {
+      // Start with a non-zero seed, often a prime number.
+      h: u32 = 17;
+
+      // Mix in each component of the vector.
+      // Multiplying by another prime number (like 31) helps distribute the bits.
+      h = h * 31 + v.x.(u32);
+      h = h * 31 + v.y.(u32);
+      
+      return h;
+    }
+    // A hash table to keep track of tiles we've already visited to avoid infinite loops.
+    visited: Table.Table(SVector, bool, given_compare_function = compare_s_vector, given_hash_function = hash);
+    Table.init(*visited);
+    defer Table.deinit(*visited); // Ensure the table memory is freed when the function exits.
+
+    // Start the process with the given position.
+    array_add(*queue, pos);
+    Table.table_add(*visited, pos, true);
+
+    while queue.count > 0 {
+        // Get the next tile from the front of the queue.
+        current_pos := queue[0];
+        array_ordered_remove_by_index(*queue, 0);
+
+        // Place a wall at the current position.
+        create_wall(current_pos);
+
+        // Now, check the four neighbors (up, down, left, right).
+        neighbors := SVector.[
+            current_pos + xy(0, 1),  // Down
+            current_pos + xy(0, -1), // Up
+            current_pos + xy(1, 0),  // Right
+            current_pos + xy(-1, 0)  // Left
+        ];
+
+        for neighbor_pos : neighbors {
+            // A neighbor is a candidate for the fill if it is:
+            // 1. Within the game world's bounds.
+            // 2. Not already visited.
+            // 3. Not currently occupied by another entity.
+            index, success := Table.table_find(*visited, neighbor_pos); 
+            is_candidate := is_valid(neighbor_pos) &&
+                            !success &&
+                            find_entity_at(neighbor_pos) == null;
+
+            if is_candidate {
+                Table.table_add(*visited, neighbor_pos, true); // Mark as visited.
+                array_add(*queue, neighbor_pos);         // Add to the queue to process later.
+            }
+        }
+    }
+
+    // IMPORTANT: After adding many entities, we must rebuild the world's
+    // entity groups and caches to ensure everything works correctly.
+    entity_world_rebuild(*world);
+}
+
 edit_system :: (dt: float) {
   if !game_state.edit_mode then return;
 
@@ -1196,6 +1362,10 @@ edit_system :: (dt: float) {
     } else {
       trigger_screen_shake(4, 1);
     }
+  }
+
+  if rl.IsKeyPressed(.KEY_F) && game_state.selected_point.x != -1 {
+    flood_fill_walls(game_state.selected_point);
   }
 
   if rl.IsKeyDown(.KEY_LEFT_ALT) {
@@ -1292,6 +1462,10 @@ edit_system :: (dt: float) {
         create_coin(game_state.selected_point);
         game_state.selected_point.x = -1;
       }
+      if rl.GuiButton(rl.Rectangle.{100*2, height-80, 90, 30}, "VISION") {
+        create_vision(game_state.selected_point);
+        game_state.selected_point.x = -1;
+      }
     }
   }
 }
@@ -1334,7 +1508,7 @@ glyph_basic_render_system :: () {
 }
 
 is_basic_rendered :: (kind: Entity_Kind) -> bool {
-  return kind == .WALL || kind == .ENEMY || kind == .KILL_TILE || kind == .DOOR || kind == .LEVER || kind == .DEAD_MARTYR || kind == .DIGGABLE || kind == .GOAL || kind == .COIN;
+  return kind == .WALL || kind == .ENEMY || kind == .KILL_TILE || kind == .DOOR || kind == .LEVER || kind == .DEAD_MARTYR || kind == .DIGGABLE || kind == .GOAL || kind == .COIN || kind == .VISION;
 }
 
 glyph_basic_update_system :: (dt: float) {
@@ -1373,18 +1547,19 @@ glyph_basic_update_system :: (dt: float) {
   }
 }
 
-render_ui_system :: () {
-  draw_string :: (start_x: s16, y: s16, str: string, background: rl.Color = rl.BLANK) {
-    x := start_x;
-    for i : 0..str.count-1 {
-      c := str[i];
-      cell := *buffer[x][y];
-      cell.glyph = c;
-      cell.fg = rl.WHITE;
-      cell.bg = background;
-      x += 1;
-    }
+draw_string :: (start_x: s16, y: s16, str: string, background: rl.Color = rl.BLANK) {
+  x := start_x;
+  for i : 0..str.count-1 {
+    c := str[i];
+    cell := *buffer[x][y];
+    cell.glyph = c;
+    cell.fg = rl.WHITE;
+    cell.bg = background;
+    x += 1;
   }
+}
+
+render_ui_system :: () {
   y := UI_START_Y;
   glyph := 126;
   for x: 0..COLS-1 {
@@ -1418,6 +1593,11 @@ render_ui_system :: () {
       }else {
         cell.bg.a = 0;
       }
+
+      if game_state.loop_locked[it] {
+        cell.bg = rl.RED;
+        cell.bg.a = 120;
+      }
     }
 
     if game_state.state == .PLAYING {
@@ -1432,6 +1612,20 @@ render_ui_system :: () {
 
       flavor := get_goal_flavor_text();
       draw_string(CYCLE_START_X, CYCLE_Y+3, flavor);
+
+      if game_state.level_goal == .COLLECT_COINS {
+        coins_left := world.entity_groups[Entity_Kind.COIN].count;
+        text := tprint("left=%", coins_left);
+        x := (COLS-1-text.count).(s16);
+        draw_string(x, CYCLE_Y+3, text);
+      } 
+      if game_state.level_goal == .KILL_ALL_ENEMIES {
+        enemies_left := world.entity_groups[Entity_Kind.ENEMY].count;
+        text := tprint("left=%", enemies_left);
+        x := (COLS-1-text.count).(s16);
+        draw_string(x, CYCLE_Y+3, text);
+      }
+
     } else if game_state.state == .PICKING_LOOP {
       mod_your_loop :: "MOD YOUR LOOP";
       draw_string(CYCLE_START_X, CYCLE_Y-2, mod_your_loop);
@@ -1481,23 +1675,6 @@ pick_character_to_end_with :: () {
   }
 }
 
-spawn_coins :: () {
-  spawned_coins := 0;
-  for potential_coin_positions {
-    CHANCE_FOR_COIN :: 0.3;
-    if random_get_zero_to_one() < CHANCE_FOR_COIN {
-      create_coin(it);
-      spawned_coins += 1;
-    }
-  }
-
-  // Because, we only spawn coins when its a coin collect goal, and in that case we MUST ensure there is atlest ONE coin on the map
-  if spawned_coins == 0 {
-    pos := potential_coin_positions[random_get() & potential_coin_positions.count.(u64)];
-    create_coin(pos);
-  }
-}
-
 get_goal_flavor_text :: () -> string {
   if game_state.level_goal == {
     case .REACH_END;
@@ -1543,15 +1720,71 @@ level_completed :: (from_pos: SVector) {
     entity_world_remove(*world, coin.id);
   }
 
-  game_state.level_goal = (game_state.level_goal + 1) % (Level_Goal.COLLECT_COINS + 1);
+  game_state.level_goal = (game_state.level_goal + 1) % (Level_Goal.KILL_ALL_ENEMIES + 1);
   if game_state.level_goal == {
     case .REACH_END;
       create_goal(potential_goal_positions[random_get() % potential_goal_positions.count.(u64)]);
     case .REACH_END_WITH;
       create_goal(potential_goal_positions[random_get() % potential_goal_positions.count.(u64)]);
       pick_character_to_end_with();
-    case .COLLECT_COINS;
-      spawn_coins();
+  }
+
+  // Move player to start
+  player := world.entity_groups[Entity_Kind.PLAYER][0];
+  player.pos = xy(1, 1);
+  command: Command;
+  set(*command, PlayerMove.{ player.pos, player.pos, player });
+  entity_world_push_command(*world, command);
+
+  // Reset doors and reset alive enemies to their spawn position
+  for *world.entities {
+    if it.kind == {
+      case .DOOR;
+        it.door_open = false;
+      case .ENEMY;
+        it.pos = it.spawn_pos;
+    }
+  }
+
+  // Loop thruogh and dice roll new enemies
+  for potetial_enemy_positions {
+    occupied := false;
+    for enemy : world.entity_groups[Entity_Kind.ENEMY] {
+      if enemy.pos == it {
+        occupied = true;
+        break;
+      }
+    }
+
+    if occupied then continue;
+
+    if random_get_zero_to_one() < CHANCE_OF_ENEMY {
+      create_enemy(it);
+      entity_world_rebuild(*world);
+    }
+  }
+
+  // Because if we are on KILL_ALL_ENEMIES goal, we need to ensure there is atleast ONE enemy on the map 
+  if game_state.level_goal == .KILL_ALL_ENEMIES && world.entity_groups[Entity_Kind.ENEMY].count == 0 {
+    pos := potetial_enemy_positions[random_get() % potetial_enemy_positions.count.(u64)];
+    create_enemy(pos);
+  }
+
+  // Enemies and players should be out the way here, so all we have to worry about is WALL and FIRE
+  if game_state.level_goal == .COLLECT_COINS {
+    assert(player.pos == xy(1,1));
+    COIN_CHANCE :: .4;
+    for pos: potential_coin_positions {
+      if random_get_zero_to_one() > COIN_CHANCE continue;
+      create_coin(pos);
+    }
+
+    entity_world_rebuild(*world);
+
+    if world.entity_groups[Entity_Kind.COIN].count == 0 {
+      pos := potential_coin_positions[random_get() % potential_coin_positions.count.(u64)];
+      create_coin(pos);
+    }
   }
 }
 
@@ -1562,14 +1795,7 @@ transition_system :: (dt: float) {
 
   if game_state.transition_out && game_state.transition_t > 1.1 {
     game_state.transition_out = false;
-    // Reset player here
-    player := world.entity_groups[Entity_Kind.PLAYER][0];
-    player.pos = xy(1, 1);
-    game_state.transition_origin = xy(player.pos.x.(float), player.pos.y.(float));
-
-    command: Command;
-    set(*command, PlayerMove.{ player.pos, player.pos, player });
-    entity_world_push_command(*world, command);
+    game_state.transition_origin = xy(1.0, 1.0);
     
     if game_state.spawn_level_flag {
       create_level();
@@ -1619,6 +1845,30 @@ update_player_light_system :: (dt: float) {
       cmd: Command;
       set(*cmd, LightUpdate.{});
       entity_world_push_command(*world, cmd);
+    }
+  }
+}
+
+vision_render_system :: () {
+  if game_state.standing_on_vision {
+    // Light up all goals
+    if game_state.level_goal == {
+      case .REACH_END; #through;
+      case .REACH_END_WITH;
+        for goal : world.entity_groups[Entity_Kind.GOAL] {
+          cell := *buffer[goal.pos.x][goal.pos.y];
+          cell.fg.a = 255;
+        }
+      case .COLLECT_COINS;
+        for coin : world.entity_groups[Entity_Kind.COIN] {
+          cell := *buffer[coin.pos.x][coin.pos.y];
+          cell.fg.a = 255;
+        }
+      case .KILL_ALL_ENEMIES;
+        for enemy : world.entity_groups[Entity_Kind.ENEMY] {
+          cell := *buffer[enemy.pos.x][enemy.pos.y];
+          cell.fg.a = 255;
+        }        
     }
   }
 }
@@ -1692,37 +1942,7 @@ menu_system :: (dt: float) {
 level_complete_system :: (dt: float) {
   for world.commands {
     if isa(it, LevelCompleted) {
-      for *world.entities {
-        if it.kind == {
-          case .DOOR;
-            it.door_open = false;
-          case .ENEMY;
-            it.pos = it.spawn_pos;
-        }
-      }
 
-      // Loop thruogh and dice roll new enemies
-      for potetial_enemy_positions {
-        occupied := false;
-        for enemy : world.entity_groups[Entity_Kind.ENEMY] {
-          if enemy.pos == it {
-            occupied = true;
-            break;
-          }
-        }
-        if !occupied {
-          if random_get_zero_to_one() < CHANCE_OF_ENEMY {
-           create_enemy(it);
-          }
-        }
-      }
-      
-      entity_world_rebuild(*world);
-      // Because if we are on KILL_ALL_ENEMIES goal, we need to ensure there is atleast ONE enemy on the map 
-      if game_state.level_goal == .KILL_ALL_ENEMIES && world.entity_groups[Entity_Kind.ENEMY].count == 0 {
-        pos := potetial_enemy_positions[random_get() % potetial_enemy_positions.count.(u64)];
-        create_enemy(pos);
-      }
     }
     else if isa(it, EnemyKilled) {
       enemies_left := world.entity_groups[Entity_Kind.ENEMY].count;
@@ -1732,6 +1952,51 @@ level_complete_system :: (dt: float) {
       }
     }
   }
+}
+
+clear_play_area :: () {
+  // Loop over every tile in the gameplay area (not the UI).
+  for y: 0..GAME_AREA_SIZE-1 {
+    for x: 0..COLS-1 {
+      cell := *buffer[x][y];
+      // Reset the cell to be completely empty.
+      cell.glyph = " "[0];
+      cell.fg = rl.BLANK; // Transparent
+      cell.bg = rl.BLANK;
+      cell.shake = false;
+    }
+  }
+}
+
+draw_given_up_ui :: () {
+  // --- Calculate the center of the screen ---
+  center_x := COLS / 2;
+  center_y := ROWS / 2;
+
+  // --- Main Title ---
+  title := "YOU GAVE UP";
+  title_x := center_x - (title.count / 2);
+  // Position the entire text block so it's centered. We'll start the title
+  // a few lines above the absolute center.
+  start_y := center_y - 4;
+  draw_string(title_x.(s16), start_y, title, rl.BLANK);
+
+  // --- Final Stats ---
+  floors_str := tprint("Floors Cleared: %", game_state.floors_cleared);
+  loops_str  := tprint("Total Loops: %", game_state.loops);
+  
+  floors_x := center_x - (floors_str.count / 2);
+  loops_x  := center_x - (loops_str.count / 2);
+
+  // Draw the stats two lines below the title
+  draw_string(floors_x.(s16), start_y + 2, floors_str, rl.BLANK);
+  draw_string(loops_x.(s16), start_y + 3, loops_str, rl.BLANK);
+
+  // --- Prompt to restart ---
+  prompt := "Restart the game to play again...";
+  prompt_x := center_x - (prompt.count / 2);
+  // Draw the prompt a few lines below the stats
+  draw_string(prompt_x.(s16), start_y + 6, prompt, rl.BLANK);
 }
 
 main :: () {
@@ -1753,10 +2018,9 @@ main :: () {
 
   array_add(*world.update_systems, transition_system);
   array_add(*world.render_systems, transition_render_system);
+  array_add(*world.render_systems, vision_render_system);
 
-  // Fill up the world
   create_player();
-  // create_level();
 
   entity_world_rebuild(*world);
 
@@ -1785,6 +2049,11 @@ main :: () {
 
     clear_buffer();
     entity_world_render(*world);
+
+    if game_state.state == .GIVEN_UP {
+      clear_play_area();
+      draw_given_up_ui();
+    }
 
     shake_offset := Vector2.{ 0, 0 };
     if game_state.shake_duration > 0 {
@@ -1859,5 +2128,6 @@ main :: () {
 Table :: #import "Hash_Table";
 rl :: #import "raylib";
 
+#load "util.jai";
 #load "levels.jai";
 #load "ascii-math.jai";
