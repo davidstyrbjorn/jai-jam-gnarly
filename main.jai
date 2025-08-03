@@ -16,6 +16,12 @@ GOAL_COLOR :: rl.Color.{ 255, 215, 0, 255 };
 
 STANDING_ON_WALL_BG :: rl.Color.{ 100, 100, 100, 100 };
 
+TUTORIAL_BOX_WIDTH  :: 25;
+TUTORIAL_BOX_HEIGHT :: 15;
+TUTORIAL_BOX_X :s16 : (COLS / 2) - (TUTORIAL_BOX_WIDTH / 2);
+TUTORIAL_BOX_Y :s16 : (GAME_AREA_SIZE / 2) - (TUTORIAL_BOX_HEIGHT / 2);
+HELP_Y:s16 : TUTORIAL_BOX_Y + TUTORIAL_BOX_HEIGHT + 1;
+
 Level_Goal :: enum {
   REACH_END :: 0;
   COLLECT_COINS :: 1;
@@ -31,8 +37,18 @@ LIGHT_SOURCE_KINDS :: struct{
 FIRE_COLOR_1 :: rl.Color.{ 255,90,0,50 };
 FIRE_COLOR_2 :: rl.Color.{ 255,154,0,50 };
 
-CYCLE_START_X :: 3;
+CYCLE_START_X :: 4;
 CYCLE_Y :: UI_START_Y + 3;
+
+SFX_NAMES :: string.[
+  "ui_confirm.wav",
+  "ui_move.wav",
+  "LOOPend.wav",
+];
+
+sfx: Table.Table(string, rl.Sound);
+
+MUSIC_VOLUME :: .8;
 
 State :: enum {
   TRANSITION;
@@ -54,10 +70,12 @@ GameState :: struct {
   on_back_button: bool = false;
 
   loop: [4]CharacterType;
+  tutorial_loop: [5]CharacterType;
+  tutorial_loop_idx: int;
   loop_locked: [4]bool;
   current_loop_idx: int = 0;
-  loops: int = 0;
-  floors_cleared: int = 0;
+  deaths: int = 0;
+  loops_done: int = 0;
 
   light_t: float;
   player_light_str: s16 = 12;
@@ -76,6 +94,12 @@ GameState :: struct {
   reach_end_with: CharacterType;
 
   state: State = .MENU;
+
+  music_intro: rl.Music;
+  music_loop: rl.Music;
+  music_muted: bool;
+  music_volume: float = MUSIC_VOLUME;
+  curr_music_volume: float = 0.0;
 }
 game_state: GameState;
 world: EntityWorld;
@@ -947,15 +971,15 @@ create_player :: () {
         entity_world_remove(*world, id);
         entity_world_rebuild(*world);
     }
-
-    // A single rebuild after all removals are done.
-    if ids_to_remove.count > 0 {
-    } 
   }
 
  
   update_player :: (player: *Entity, dt: float) {
-    player.character_type = game_state.loop[game_state.current_loop_idx];
+    if game_state.state == .MENU {
+      player.character_type = game_state.tutorial_loop[game_state.tutorial_loop_idx];
+    }else {
+      player.character_type = game_state.loop[game_state.current_loop_idx];
+    }
     player.glyph = CHARACTER_GLYPHS[player.character_type].(int);
     player.color = CHARACTER_COLORS[player.character_type];
 
@@ -964,9 +988,11 @@ create_player :: () {
       if game_state.modifying_loop_index {
         if rl.IsKeyPressed(.KEY_D) {
           game_state.desired_character_type += 1;
+          play_sfx("ui_move.wav");
         }
         else if rl.IsKeyPressed(.KEY_A) {
           game_state.desired_character_type -= 1;
+          play_sfx("ui_move.wav");
         } 
         game_state.desired_character_type = clamp(game_state.desired_character_type, 0, CharacterType.WIZARD);
 
@@ -975,10 +1001,12 @@ create_player :: () {
           // Done, reset
           game_state.modifying_loop_index = false;
           game_state.desired_character_type = 0;          
+          play_sfx("ui_confirm.wav");
         }
       } 
       else if game_state.on_back_button {
         if rl.IsKeyPressed(.KEY_W) {
+          play_sfx("ui_move.wav");
           game_state.on_back_button = false;
         }
         else if rl.IsKeyPressed(.KEY_SPACE) {
@@ -989,25 +1017,30 @@ create_player :: () {
           game_state.editing_loop_index = 0;
 
           game_state.state = .PLAYING;
+          play_sfx("ui_confirm.wav");
         }
       } 
       else {
         if rl.IsKeyPressed(.KEY_D) {
           game_state.editing_loop_index += 1;
+          play_sfx("ui_move.wav");
         }
         else if rl.IsKeyPressed(.KEY_A) {
           game_state.editing_loop_index -= 1;
+          play_sfx("ui_move.wav");
         } 
         else if rl.IsKeyPressed(.KEY_SPACE) {
           game_state.modifying_loop_index = true;
+          play_sfx("ui_confirm.wav");
         }
         else if rl.IsKeyPressed(.KEY_S) {
+          play_sfx("ui_move.wav");
           game_state.on_back_button = true;  
         }
         game_state.editing_loop_index = clamp(game_state.editing_loop_index, 0, 3);
       }
     }
-    else if game_state.state == .PLAYING {
+    else if game_state.state == .PLAYING || game_state.state == .MENU {
       SWIPE_MOVE_FREQ :: 0.1; // Seconds
       if player.character_type == .SWIPER && !is_zero(player.swiping_dir) {
         player.swipe_counter += dt;
@@ -1077,7 +1110,9 @@ create_player :: () {
           cmd: Command;
           set(*cmd, PlayerDied.{});
           entity_world_push_command(*world, cmd);
-          game_state.loop_locked[game_state.current_loop_idx] = true;
+          if game_state.state == .PLAYING {
+            game_state.loop_locked[game_state.current_loop_idx] = true;
+          }
         }
 
         if rl.IsKeyPressed(.KEY_Y) {
@@ -1121,20 +1156,31 @@ create_player :: () {
         if isa(it, PlayerDied) {
           game_state.current_loop_idx = (game_state.current_loop_idx+1) % game_state.loop.count;
           while game_state.loop_locked[game_state.current_loop_idx] game_state.current_loop_idx = (game_state.current_loop_idx+1) % game_state.loop.count;
+          
+          if game_state.state == .MENU {
+            game_state.current_loop_idx = game_state.tutorial_loop_idx;
+            game_state.tutorial_loop_idx = (game_state.tutorial_loop_idx+1) % game_state.tutorial_loop.count;
+          }
+          
           player.action_prepped = false;
-          game_state.loops += 1;
+          game_state.deaths += 1;
           trigger_screen_shake(2, 0.5);
-          set_player_pos(player, 1, 1);
+
+          if game_state.state == .MENU {
+            set_player_pos(player, TUTORIAL_BOX_X + 1, TUTORIAL_BOX_Y + 1);
+          }else {
+            set_player_pos(player, 1, 1);
+          }
         }
       }
 
   #if !RELEASE_BUILD {
       if rl.IsKeyPressed(.KEY_C) {
-        create_wall(xy(player.pos.x, player.pos.y)); // Give birth, right here, right now
+        // create_wall(xy(player.pos.x, player.pos.y)); // Give birth, right here, right now
       }
       if rl.IsKeyPressed(.KEY_TAB) then game_state.edit_mode = !game_state.edit_mode;
       // if rl.IsKeyPressed(.KEY_X) then trigger_screen_shake(5, 1);
-      if rl.IsKeyPressed(.KEY_X) then level_completed(player.pos);
+      // if rl.IsKeyPressed(.KEY_X) then level_completed(player.pos);
   }
     }
   }
@@ -1142,7 +1188,7 @@ create_player :: () {
   render_player :: (player: *Entity) {
     player_cell := *buffer[player.pos.x][player.pos.y];
     player_cell.fg = player.color;
-    if game_state.state == .MENU || game_state.state == .TRANSITION {
+    if game_state.state == .TRANSITION {
       player_cell.fg.a = 0;
     }
     player_cell.glyph = player.glyph;
@@ -1231,6 +1277,11 @@ kill_tile_system :: (dt: float) {
   for world.entity_groups[Entity_Kind.KILL_TILE] {
     if random_get() % 100 < 10 {
       it.glyph = cast(int)(32 + random_get() % (126-32));
+      if game_state.state == .MENU {
+        if it.pos == xy(17, HELP_Y+3) && game_state.tutorial_loop[game_state.tutorial_loop_idx] != .MARTYR {
+          it.glyph = " "[0];
+        }
+      }
     }
   }
 }
@@ -1333,7 +1384,7 @@ edit_system :: (dt: float) {
     grid_pos: SVector;
     grid_pos.x = (mouse_pos.x * COLS).(s16); 
     grid_pos.y = (mouse_pos.y * ROWS).(s16); 
-
+    
     // We want to be able to modify the loop easily, so initiate that here
     if grid_pos.y == CYCLE_Y {
       idx := 0;
@@ -1480,7 +1531,7 @@ glyph_basic_render_system :: () {
       cell.fg = it.color;
       cell.bg = it.background;
 
-      if game_state.edit_mode {
+      if game_state.edit_mode || (game_state.state == .MENU && it.kind != .DOOR)  {
         cell.fg.a = 255;
       }
 
@@ -1490,13 +1541,13 @@ glyph_basic_render_system :: () {
 
   // Color background if player is overlapping with wall
   player := world.entity_groups[Entity_Kind.PLAYER][0];
-  for world.entity_groups[Entity_Kind.WALL] {
-    if it.pos == player.pos {
-      cell := *buffer[it.pos.x][it.pos.y];
-      cell.bg = STANDING_ON_WALL_BG;
-      break;
-    }
-  }
+  // for world.entity_groups[Entity_Kind.WALL] {
+  //   if it.pos == player.pos {
+  //     cell := *buffer[it.pos.x][it.pos.y];
+  //     cell.bg = STANDING_ON_WALL_BG;
+  //     break;
+  //   }
+  // }
 
   // Color background if player is overlapping with goal
   for world.entity_groups[Entity_Kind.GOAL] {
@@ -1549,13 +1600,17 @@ glyph_basic_update_system :: (dt: float) {
   }
 }
 
-draw_string :: (start_x: s16, y: s16, str: string, background: rl.Color = rl.BLANK) {
+draw_string :: (start_x: s16, y: s16, str: string, background: rl.Color = rl.BLANK, color: rl.Color = rl.WHITE, skip_blank: bool = false) {
   x := start_x;
   for i : 0..str.count-1 {
     c := str[i];
+    if c == " "[0] && skip_blank {
+      x += 1;
+      continue;
+    };
     cell := *buffer[x][y];
     cell.glyph = c;
-    cell.fg = rl.WHITE;
+    cell.fg = color;
     cell.bg = background;
     x += 1;
   }
@@ -1578,14 +1633,14 @@ render_ui_system :: () {
     }
   }
   if game_state.state == .PLAYING || game_state.state == .PICKING_LOOP {
-    cell := *buffer[CYCLE_START_X + game_state.current_loop_idx][CYCLE_Y+1];
     if game_state.state == .PLAYING {
-      cell.glyph = 94;
+      cell := *buffer[CYCLE_START_X + game_state.current_loop_idx][CYCLE_Y+1];
+      cell.glyph = "^"[0];
       cell.fg = rl.WHITE;
     }
 
     for 0..3 {
-      cell = *buffer[CYCLE_START_X+it][CYCLE_Y];
+      cell := *buffer[CYCLE_START_X+it][CYCLE_Y];
       cell.glyph = CHARACTER_GLYPHS[game_state.loop[it]].(int);
       cell.fg = CHARACTER_COLORS[game_state.loop[it]];
       cell.bg = rl.GRAY;
@@ -1603,40 +1658,44 @@ render_ui_system :: () {
     }
 
     if game_state.state == .PLAYING {
-      draw_string(CYCLE_START_X, CYCLE_Y-2, "R=next");
+      draw_string(CYCLE_START_X, CYCLE_Y-1, "R=next");
       draw_string(CYCLE_START_X, CYCLE_Y-2, "Y=give up");
       
-      loops_str := tprint("loops=%", game_state.loops);
-      draw_string(CYCLE_START_X, CYCLE_Y+2, loops_str);
+      death_str := tprint("deaths=%", game_state.deaths);
+      draw_string(CYCLE_START_X, CYCLE_Y+2, death_str);
 
-      floors_cleared_str := tprint("floor=%", game_state.floors_cleared+1);
-      draw_string(CYCLE_START_X+8, CYCLE_Y+2, floors_cleared_str);
+      loops_done_str := tprint("loops=%/8", game_state.loops_done);
+      x := (CYCLE_START_X+death_str.count+1).(s16);
+      draw_string(x, CYCLE_Y+2, loops_done_str);
 
       flavor := get_goal_flavor_text();
-      draw_string(CYCLE_START_X, CYCLE_Y+3, flavor);
+      x = (COLS - flavor.count).(s16);
+      draw_string(x, CYCLE_Y+3, flavor, rl.ColorAlpha(rl.PURPLE, .5));
 
       if game_state.level_goal == .COLLECT_COINS {
         coins_left := world.entity_groups[Entity_Kind.COIN].count;
         text := tprint("left=%", coins_left);
-        x := (COLS-1-text.count).(s16);
-        draw_string(x, CYCLE_Y+3, text);
+        x := (COLS-text.count).(s16);
+        draw_string(x, CYCLE_Y+2, text);
       } 
       if game_state.level_goal == .KILL_ALL_ENEMIES {
         enemies_left := world.entity_groups[Entity_Kind.ENEMY].count;
         text := tprint("left=%", enemies_left);
-        x := (COLS-1-text.count).(s16);
+        x := (COLS-text.count).(s16);
         draw_string(x, CYCLE_Y+3, text);
       }
 
     } else if game_state.state == .PICKING_LOOP {
       mod_your_loop :: "MOD YOUR LOOP";
-      draw_string(CYCLE_START_X, CYCLE_Y-2, mod_your_loop);
+      draw_string(CYCLE_START_X, CYCLE_Y-2, mod_your_loop, rl.ColorAlpha(rl.PURPLE, .5));
       // TODO: 
       // for x: CYCLE_START_X..CYCLE_START_X + mod_your_loop.count {
       //   cell := *buffer[x][CYCLE_Y-2];
       //   cell.shake = true;
       // }
       draw_string(CYCLE_START_X, CYCLE_Y+1, "DONE", ifx game_state.on_back_button then rl.ColorAlpha(rl.GRAY, 100) else rl.BLANK);
+      
+      draw_string(CYCLE_START_X, ROWS-1, "WASD + SPACE");
 
       if game_state.modifying_loop_index {
         draw_string(5+CYCLE_START_X, CYCLE_Y-1, "SWAP TO");
@@ -1658,9 +1717,54 @@ render_ui_system :: () {
     }
   }
   else if game_state.state == .MENU {
-    prompt := "PRESS SPACE";
+    prompt := "PRESS X TO PLAY";
     x := (COLS/2)-prompt.count/2-1;
-    draw_string(x.(s16), 10, "PRESS SPACE");
+    draw_string(x.(s16), 6, prompt);
+
+    draw_string_centered :: (y: s16, str: string) {
+      x: s16 = (COLS/2 - str.count/2).(s16);
+      draw_string(x, y, str, skip_blank = true);
+    }
+
+    draw_string_centered(TUTORIAL_BOX_Y - 2, "WASD = MOVE");
+    draw_string_centered(TUTORIAL_BOX_Y - 3, "R = NEXT");
+
+    if world.entity_groups[Entity_Kind.ENEMY].count == 0 {
+      draw_string_centered(5, "COOL SHIT MAN!");
+    }
+
+    // Display some info about the current tutorial character
+    HELP_Y:s16 : TUTORIAL_BOX_Y + TUTORIAL_BOX_HEIGHT + 1;
+    character_type := game_state.tutorial_loop[game_state.tutorial_loop_idx];
+    if character_type == {
+      case .TINKERER;
+        str := "TINKERER";
+        x: s16 = (COLS/2 - str.count/2).(s16);
+        draw_string(x, HELP_Y, str, color = CHARACTER_COLORS[character_type]);
+        draw_string_centered(HELP_Y+2, "SPACE + WASD = PLACE WALL");
+        draw_string_centered(HELP_Y+3, "SPACE + WASD + L = OPEN DOOR");
+      case .SWIPER;
+        str := "SWIPER";
+        x: s16 = (COLS/2 - str.count/2).(s16);
+        draw_string(x, HELP_Y, str, color = CHARACTER_COLORS[character_type]);
+        draw_string_centered(HELP_Y+2, "WASD = DASH");
+        draw_string_centered(HELP_Y+3, "DASH KILLS ENEMY");
+      case .MARTYR;
+        str := "MARTYR";
+        x: s16 = (COLS/2 - str.count/2).(s16);
+        draw_string(x, HELP_Y, str, color = CHARACTER_COLORS[character_type]);
+        draw_string_centered(HELP_Y+2, "WALK ON   = COVER IT UP");
+      case .DIGGER;
+        str := "DIGGER";
+        x: s16 = (COLS/2 - str.count/2).(s16);
+        draw_string(x, HELP_Y, str, color = CHARACTER_COLORS[character_type]);
+        draw_string_centered(HELP_Y+2, "SPACE + WASD = DIG #");
+      case .WIZARD;
+        str := "WIZARD";
+        x: s16 = (COLS/2 - str.count/2).(s16);
+        draw_string(x, HELP_Y, str, color = CHARACTER_COLORS[character_type]);
+        draw_string_centered(HELP_Y+2, "SPACE + WASD = FIREBALL");
+    }
   }
 }
 
@@ -1698,7 +1802,7 @@ level_completed :: (from_pos: SVector) {
   game_state.transition_origin = xy(from_pos.x.(float), from_pos.y.(float));
   game_state.transition_out = true;
   game_state.spawn_level_flag = false;
-  game_state.floors_cleared += 1;
+  game_state.loops_done += 1;
   for y : 0..ROWS-1 {
     for x : 0..COLS-1 {
       cell := *buffer[x][y];
@@ -1706,6 +1810,8 @@ level_completed :: (from_pos: SVector) {
       cell.prev_override_flag = false;
     }
   }
+
+  play_sfx("LOOPend.wav", 0.65);
 
   cmd: Command;
   set(*cmd, LevelCompleted.{});
@@ -1792,10 +1898,10 @@ level_completed :: (from_pos: SVector) {
 
 transition_system :: (dt: float) {
   if game_state.state != .TRANSITION then return;
-  if game_state.transition_out then game_state.transition_t += dt;
+  if game_state.transition_out then game_state.transition_t += dt*1.05;
   else game_state.transition_t -= dt;
 
-  if game_state.transition_out && game_state.transition_t > 1.1 {
+  if game_state.transition_out && game_state.transition_t > 1.0 {
     game_state.transition_out = false;
     game_state.transition_origin = xy(1.0, 1.0);
     
@@ -1924,7 +2030,7 @@ transition_render_system :: () {
 menu_system :: (dt: float) {
   if game_state.state != .MENU then return;
   
-  if rl.IsKeyPressed(.KEY_SPACE) {
+  if rl.IsKeyPressed(.KEY_X) {
     // Initalise a transition
     game_state.state = .TRANSITION;
     game_state.transition_t = 0.0;
@@ -1937,6 +2043,45 @@ menu_system :: (dt: float) {
         cell.override_flag = false;
         cell.prev_override_flag = false;
       }
+    }
+
+    game_state.deaths = 0;
+    game_state.current_loop_idx = 0;
+
+    // Destroy all tutorial entities!
+    player := world.entity_groups[Entity_Kind.PLAYER][0];
+    player.pos = sxy(1,1);
+
+    ids: [..]u32;
+    ids.allocator = temp;
+    for world.entity_groups[Entity_Kind.WALL] {
+      array_add(*ids, it.id);
+    }
+    for world.entity_groups[Entity_Kind.DIGGABLE] {
+      array_add(*ids, it.id);
+    }
+    for world.entity_groups[Entity_Kind.LEVER] {
+      array_add(*ids, it.id);
+    }
+    for world.entity_groups[Entity_Kind.DOOR] {
+      array_add(*ids, it.id);
+    }
+    for world.entity_groups[Entity_Kind.KILL_TILE] {
+      array_add(*ids, it.id);
+    }
+    for world.entity_groups[Entity_Kind.ENEMY] {
+      array_add(*ids, it.id);
+    }
+    for world.entity_groups[Entity_Kind.LASER] {
+      array_add(*ids, it.id);
+    }
+    for world.entity_groups[Entity_Kind.FIRE] {
+      array_add(*ids, it.id);
+    }
+
+    for ids {
+      entity_world_remove(*world, it);
+      entity_world_rebuild(*world);
     }
   }
 }
@@ -1970,6 +2115,25 @@ clear_play_area :: () {
   }
 }
 
+init_sfx :: () {
+  Table.init(*sfx);
+  for SFX_NAMES {
+    path := tprint("audio/sfx/%", it);
+    Table.table_add(*sfx, it, rl.LoadSound(to_c_string(path)));
+  }
+}
+
+play_sfx :: (name: string, volume: float = 1.0) {
+  sound, success := Table.table_find(*sfx, name);
+  if !success {
+    print("Failed to play sfx %", name);
+    return;
+  }
+  // rl.SetSoundVolume(sound, volume);
+  print("playing sfx %\n", name);
+  rl.PlaySound(sound);
+}
+
 draw_given_up_ui :: () {
   // --- Calculate the center of the screen ---
   center_x := COLS / 2;
@@ -1984,8 +2148,8 @@ draw_given_up_ui :: () {
   draw_string(title_x.(s16), start_y, title, rl.BLANK);
 
   // --- Final Stats ---
-  floors_str := tprint("Floors Cleared: %", game_state.floors_cleared);
-  loops_str  := tprint("Total Loops: %", game_state.loops);
+  floors_str := tprint("Loops Done=%", game_state.loops_done);
+  loops_str  := tprint("Deaths=%", game_state.deaths);
   
   floors_x := center_x - (floors_str.count / 2);
   loops_x  := center_x - (loops_str.count / 2);
@@ -1999,6 +2163,132 @@ draw_given_up_ui :: () {
   prompt_x := center_x - (prompt.count / 2);
   // Draw the prompt a few lines below the stats
   draw_string(prompt_x.(s16), start_y + 6, prompt, rl.BLANK);
+}
+
+create_tutorial_box :: () {
+  create_wall(xy(8, 13));
+  create_wall(xy(9, 13));
+  create_wall(xy(10, 13));
+  create_wall(xy(11, 13));
+  create_wall(xy(12, 13));
+  create_wall(xy(13, 13));
+  create_wall(xy(14, 13));
+  create_wall(xy(15, 13));
+  create_wall(xy(16, 13));
+  create_wall(xy(17, 13));
+  create_wall(xy(18, 13));
+  create_wall(xy(19, 13));
+  create_wall(xy(20, 13));
+  create_wall(xy(21, 13));
+  create_wall(xy(22, 13));
+  create_wall(xy(23, 13));
+  create_wall(xy(24, 13));
+  create_wall(xy(25, 13));
+  create_wall(xy(26, 13));
+  create_wall(xy(27, 13));
+  create_wall(xy(28, 13));
+  create_wall(xy(29, 13));
+  create_wall(xy(30, 13));
+  create_wall(xy(31, 13));
+  create_wall(xy(32, 13));
+  create_wall(xy(8, 14));
+  create_wall(xy(32, 14));
+  create_wall(xy(8, 15));
+  create_wall(xy(32, 15));
+  create_wall(xy(8, 16));
+  create_wall(xy(32, 16));
+  create_wall(xy(8, 17));
+  create_wall(xy(32, 17));
+  create_wall(xy(8, 18));
+  create_wall(xy(32, 18));
+  create_wall(xy(8, 19));
+  create_wall(xy(32, 19));
+  create_wall(xy(8, 20));
+  create_wall(xy(32, 20));
+  create_wall(xy(8, 21));
+  create_wall(xy(32, 21));
+  create_wall(xy(8, 22));
+  create_wall(xy(32, 22));
+  create_wall(xy(8, 23));
+  create_wall(xy(32, 23));
+  create_wall(xy(8, 24));
+  create_wall(xy(32, 24));
+  create_wall(xy(8, 25));
+  create_wall(xy(32, 25));
+  create_wall(xy(8, 26));
+  create_wall(xy(32, 26));
+  create_wall(xy(8, 27));
+  create_wall(xy(9, 27));
+  create_wall(xy(10, 27));
+  create_wall(xy(11, 27));
+  create_wall(xy(12, 27));
+  create_wall(xy(13, 27));
+  create_wall(xy(14, 27));
+  create_wall(xy(15, 27));
+  create_wall(xy(16, 27));
+  create_wall(xy(17, 27));
+  create_wall(xy(18, 27));
+  create_wall(xy(19, 27));
+  create_wall(xy(20, 27));
+  create_wall(xy(21, 27));
+  create_wall(xy(22, 27));
+  create_wall(xy(23, 27));
+  create_wall(xy(24, 27));
+  create_wall(xy(25, 27));
+  create_wall(xy(26, 27));
+  create_wall(xy(27, 27));
+  create_wall(xy(28, 27));
+  create_wall(xy(29, 27));
+  create_wall(xy(30, 27));
+  create_wall(xy(31, 27));
+  create_wall(xy(32, 27));
+  create_kill_tile(xy(17, 32));
+  create_wall(xy(11, 14));
+  create_wall(xy(11, 15));
+  create_wall(xy(11, 16));
+  create_wall(xy(11, 17));
+  create_wall(xy(12, 17));
+  create_wall(xy(12, 18));
+  create_wall(xy(12, 19));
+  create_wall(xy(12, 20));
+  create_wall(xy(12, 21));
+  create_wall(xy(12, 22));
+  create_wall(xy(12, 23));
+  create_wall(xy(12, 24));
+  create_wall(xy(13, 24));
+  create_wall(xy(14, 24));
+  create_wall(xy(15, 24));
+  create_wall(xy(16, 24));
+  create_wall(xy(17, 24));
+  create_wall(xy(18, 24));
+  create_wall(xy(19, 24));
+  create_laser(xy(14, 15), xy(1, 0));
+  create_laser(xy(14, 16), xy(1, 0));
+  create_diggable(xy(17, 15));
+  create_wall(xy(9, 17));
+  create_door(xy(10, 17));
+  create_lever(xy(9, 16));
+  create_diggable(xy(9, 18));
+  create_diggable(xy(10, 18));
+  create_diggable(xy(11, 18));
+  create_diggable(xy(9, 19));
+  create_diggable(xy(11, 19));
+  create_diggable(xy(10, 19));
+  create_wall(xy(9, 21));
+  create_wall(xy(11, 21));
+  create_kill_tile(xy(10, 21));
+  create_enemy(xy(10, 25));
+  create_enemy(xy(24, 21));
+  create_enemy(xy(28, 22));
+  create_enemy(xy(27, 19));
+  create_enemy(xy(21, 21));
+
+  // Place the player
+  entity_world_rebuild(*world);
+  player := world.entity_groups[Entity_Kind.PLAYER][0];
+  player.pos = sxy(TUTORIAL_BOX_X + 1, TUTORIAL_BOX_Y + 1);
+
+  create_kill_tile(xy(17, HELP_Y+3));
 }
 
 main :: () {
@@ -2024,6 +2314,8 @@ main :: () {
 
   create_player();
 
+  create_tutorial_box();
+
   entity_world_rebuild(*world);
 
   // Init the loop variable with a bunch of character states...
@@ -2031,6 +2323,12 @@ main :: () {
   game_state.loop[1] = CharacterType.TINKERER;
   game_state.loop[2] = CharacterType.MARTYR;
   game_state.loop[3] = CharacterType.DIGGER;
+  
+  game_state.tutorial_loop[0] = CharacterType.TINKERER;
+  game_state.tutorial_loop[1] = CharacterType.DIGGER;
+  game_state.tutorial_loop[2] = CharacterType.MARTYR;
+  game_state.tutorial_loop[3] = CharacterType.SWIPER;
+  game_state.tutorial_loop[4] = CharacterType.WIZARD;
 
   // Push initial move command so every glyph gets correctly lit up
   command: Command;
@@ -2041,12 +2339,65 @@ main :: () {
   rl.GuiSetStyle(0, rl.GuiDefaultProperty.TEXT_SIZE.(s32), 20);
   game_state.selected_point.x = -1;
 
+  rl.InitAudioDevice();
+  defer rl.CloseAudioDevice();
+
+  init_sfx();
+  defer {
+    for SFX_NAMES {
+      sound, success := Table.table_find(*sfx, it);
+      if !success {
+        print("Failed to get %", it);
+        return;
+      }
+
+      rl.UnloadSound(sound);
+    }
+  }
+  defer Table.deinit(*sfx);
+
+  game_state.music_intro = rl.LoadMusicStream("audio/bg-intro.mp3");
+  game_state.music_loop = rl.LoadMusicStream("audio/bg-loop.mp3");
+  game_state.music_loop.looping = true;
+  rl.PlayMusicStream(game_state.music_intro);
+  intro_finished: bool = false;
+  defer rl.UnloadMusicStream(game_state.music_intro);
+  defer rl.UnloadMusicStream(game_state.music_loop);
+
   while !rl.WindowShouldClose() {
     memory_visualizer_per_frame_update();
 
     reset_temporary_storage();
-
     dt := rl.GetFrameTime();
+
+    // Music related
+    if !intro_finished {
+      rl.UpdateMusicStream(game_state.music_intro);
+      if rl.GetMusicTimePlayed(game_state.music_intro) >= rl.GetMusicTimeLength(game_state.music_intro) {
+        rl.StopMusicStream(game_state.music_intro);
+        rl.PlayMusicStream(game_state.music_loop);
+        intro_finished = true;
+      }
+    }else {
+      rl.UpdateMusicStream(game_state.music_loop);
+    }
+
+    // Control the mute which in turn sets the volume
+    if rl.IsKeyPressed(.KEY_M) {
+      game_state.music_muted = !game_state.music_muted;
+      if game_state.music_muted {
+        game_state.music_volume = 0.0;
+      }else {
+        game_state.music_volume = MUSIC_VOLUME;
+      }
+    }
+
+    if game_state.state == .PLAYING || game_state.state == .PICKING_LOOP || game_state.state == .TRANSITION {
+      game_state.curr_music_volume = lerp(game_state.curr_music_volume, game_state.music_volume, dt*10);
+    }
+    rl.SetMusicVolume(game_state.music_loop, game_state.curr_music_volume);
+    rl.SetMusicVolume(game_state.music_intro, game_state.curr_music_volume);
+
     entity_world_update(*world, dt);
 
     clear_buffer();

@@ -70,10 +70,10 @@ create_level :: () {
     return prefabs[rand_idx];
   }
 
-  spawn_segment(pick_random_segment(segments[0].prefabs), xy(0, 0));
-  spawn_segment(pick_random_segment(segments[1].prefabs), xy(SEGMENT_SIZE, 0));
-  spawn_segment(pick_random_segment(segments[2].prefabs), xy(0, SEGMENT_SIZE));
-  spawn_segment(pick_random_segment(segments[3].prefabs), xy(SEGMENT_SIZE, SEGMENT_SIZE));
+  spawn_segment(pick_random_segment(segments[0]), xy(0, 0));
+  spawn_segment(pick_random_segment(segments[1]), xy(SEGMENT_SIZE, 0));
+  spawn_segment(pick_random_segment(segments[2]), xy(0, SEGMENT_SIZE));
+  spawn_segment(pick_random_segment(segments[3]), xy(SEGMENT_SIZE, SEGMENT_SIZE));
 
   assert(potential_goal_positions.count > 0);
 
@@ -167,16 +167,11 @@ OPEN_DIRECTIONS :: enum {
   LEFT :: 3;
 }
 
-SegmentSelection :: struct {
-  openness: [4]bool;
-  prefabs: []string;
-}
-
-segments: []SegmentSelection = .[
-  .{.[false, true, true, false], TOP_LEFT },
-  .{.[false, false, true, true], TOP_RIGHT },
-  .{.[true, true, false, false], BOTTOM_LEFT },
-  .{.[true, false, false, true], BOTTOM_RIGHT },
+segments: [][]string = .[
+  TOP_LEFT,
+  TOP_RIGHT,
+  BOTTOM_LEFT,
+  BOTTOM_RIGHT,
 ];
 
 #load "segments.jai";
