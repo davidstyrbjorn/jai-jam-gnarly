@@ -1,19 +1,23 @@
 
 CHARACTER_GLYPHS :: GLYPH.[.SWIPER, .TINKERER, .MARTYR, .DIGGER, .WIZARD]; // Order matters
 CHARACTER_COLORS :: rl.Color.[
-  #run color(215, 38, 56),
-  #run color(63, 136, 197),
-  #run color(244, 157, 55),
-  #run color(150, 75, 0),
+  ENEMY_COLOR,
+
+  #run color(66, 154, 227),
+  
+  #run color(255, 65, 21),
+  
+  #run color(79,58,43),
+  
   #run color(106, 49, 144),
 ];
 
 GLYPH :: enum int {
-  SWIPER :: 115;
-  TINKERER :: 116;
-  MARTYR :: 109;
-  DIGGER :: 100;
-  WIZARD :: "w"[0];
+  SWIPER :: "@"[0];
+  TINKERER :: "T"[0];
+  MARTYR :: "B"[0];
+  DIGGER :: "D"[0];
+  WIZARD :: "W"[0];
 }
 
 Node :: struct {
@@ -202,6 +206,10 @@ move_enemy_towards_player :: (player: *Entity, enemy: *Entity) -> bool {
 }
 
 get_lit_alpha :: (light_pos: SVector, from: SVector, dist_to_dark: s16) -> u8 {
+  actual_from := from;
+  if game_state.state == .TRANSITION {
+    actual_from = sxy(1,1);
+  }
   euclidian_distance := abs(light_pos.x - from.x) + abs(light_pos.y - from.y);
   if euclidian_distance > dist_to_dark {
     return 0;

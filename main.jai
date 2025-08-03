@@ -1,5 +1,11 @@
+RELEASE_BUILD :: true;
 
-RELEASE_BUILD :: false;
+#if RELEASE_BUILD {
+  #if OS == .WINDOWS {
+    #import "Windows_Resources";
+    #run disable_runtime_console();
+  }
+}
 
 GAME_AREA_SIZE :: (2 * SEGMENT_SIZE); // 43
 UI_HEIGHT :: 7;
@@ -13,14 +19,16 @@ tile_w: s16 = 20;
 tile_h: s16 = 20;
 
 GOAL_COLOR :: rl.Color.{ 255, 215, 0, 255 };
-
 STANDING_ON_WALL_BG :: rl.Color.{ 100, 100, 100, 100 };
-
+ENEMY_COLOR :: #run color(255, 20, 50);
 TUTORIAL_BOX_WIDTH  :: 25;
 TUTORIAL_BOX_HEIGHT :: 15;
 TUTORIAL_BOX_X :s16 : (COLS / 2) - (TUTORIAL_BOX_WIDTH / 2);
 TUTORIAL_BOX_Y :s16 : (GAME_AREA_SIZE / 2) - (TUTORIAL_BOX_HEIGHT / 2);
 HELP_Y:s16 : TUTORIAL_BOX_Y + TUTORIAL_BOX_HEIGHT + 1;
+
+KILL_TILE_COLOR_1 :: #run color(255, 0, 0);
+KILL_TILE_COLOR_2 :: #run color(255, 143, 0);
 
 Level_Goal :: enum {
   REACH_END :: 0;
@@ -37,18 +45,26 @@ LIGHT_SOURCE_KINDS :: struct{
 FIRE_COLOR_1 :: rl.Color.{ 255,90,0,50 };
 FIRE_COLOR_2 :: rl.Color.{ 255,154,0,50 };
 
-CYCLE_START_X :: 4;
+CYCLE_START_X :: 2;
 CYCLE_Y :: UI_START_Y + 3;
 
 SFX_NAMES :: string.[
   "ui_confirm.wav",
   "ui_move.wav",
+  "LOOPdig.wav",
+  "LOOPdig2.wav",
   "LOOPend.wav",
+  "LOOPexplosionrandom.wav",
+  "LOOPlever.wav",
+  "LOOPPickup_Coin34.WAV",
+  "LOOPshoot14.wav",
+  "LOOPwalk.wav",
+  "LOOPdie.wav",
 ];
 
 sfx: Table.Table(string, rl.Sound);
 
-MUSIC_VOLUME :: .8;
+MUSIC_VOLUME :: 1.0;
 
 State :: enum {
   TRANSITION;
@@ -56,6 +72,7 @@ State :: enum {
   PICKING_LOOP;
   MENU;
   GIVEN_UP;
+  WON;
 }
 
 GameState :: struct {
@@ -69,7 +86,7 @@ GameState :: struct {
   desired_character_type: CharacterType;
   on_back_button: bool = false;
 
-  loop: [4]CharacterType;
+  loop: [3]CharacterType;
   tutorial_loop: [5]CharacterType;
   tutorial_loop_idx: int;
   loop_locked: [4]bool;
@@ -100,6 +117,7 @@ GameState :: struct {
   music_muted: bool;
   music_volume: float = MUSIC_VOLUME;
   curr_music_volume: float = 0.0;
+  intro_finished: bool = false;
 }
 game_state: GameState;
 world: EntityWorld;
@@ -326,6 +344,11 @@ color_random :: (a: u8  = 255) -> rl.Color {
   return color(r, g, b, a);
 }
 
+color_random_kill_tile :: (a: u8 = 255) -> rl.Color {
+  t := random_get_zero_to_one();
+  return rl.ColorLerp(KILL_TILE_COLOR_1, KILL_TILE_COLOR_2, t);
+}
+
 xy :: inline (x: s16, y: s16) -> SVector {
   return SVector.{x, y};
 }
@@ -416,8 +439,8 @@ create_coin :: (pos: SVector) {
       if isa(it, PlayerMove) {
         player := world.entity_groups[Entity_Kind.PLAYER][0];
         if player.pos == coin.pos {
-          // pickup le coin, self immolate
-          trigger_screen_shake(2, 0.4);
+          play_sfx("LOOPPickup_Coin34.wav");
+
           entity_world_remove(*world, coin.id);
           entity_world_rebuild(*world);
 
@@ -641,7 +664,7 @@ create_diggable :: (pos: SVector) {
   diggable: Entity;
 
   diggable.pos = pos;
-  diggable.color = color(79, 58, 43, 255);
+  diggable.color = CHARACTER_COLORS[CharacterType.DIGGER];
   diggable.kind = .DIGGABLE;    
   diggable.glyph = 35;
 
@@ -654,7 +677,7 @@ create_lever :: (pos: SVector) {
   lever.kind = .LEVER;
 
   lever.pos = pos;
-  lever.color = color(0, 139, 139, 255);
+  lever.color = color(66, 154, 227, 255);
   lever.glyph = 76;
 
   entity_world_add(*world, lever);
@@ -671,7 +694,7 @@ create_door :: (pos: SVector) {
   door: Entity;
   door.kind = .DOOR;
   door.pos = pos;
-  door.color = color(0, 139, 139, 255);
+  door.color = color(66, 154, 227, 255);
   door.glyph = 68;
 
   door.update_proc = door_update;
@@ -696,7 +719,7 @@ create_kill_tile :: (pos: SVector) {
   kill_tile.kind = .KILL_TILE;
 
   kill_tile.pos = pos;
-  kill_tile.color = color_random();
+  kill_tile.color = color_random_kill_tile();
   kill_tile.glyph = cast(int)(32 + random_get() % (126-32));
 
   entity_world_add(*world, kill_tile);
@@ -742,6 +765,8 @@ create_enemy :: (pos: SVector) {
       return;
     }
 
+    if !(game_state.state == .PLAYING || game_state.state == .MENU) return; // Do nothing if not in these states
+
     enemy.alpha_modifier = 1.0;
     // Check if enemy is inside the beam of a laser
     for laser : world.entity_groups[Entity_Kind.LASER] {
@@ -769,8 +794,13 @@ create_enemy :: (pos: SVector) {
         set(*cmd, EnemyKilled.{});
         entity_world_push_command(*world, cmd);
         trigger_screen_shake(2, 1);
+        play_sfx("LOOPexplosionrandom.wav");
         break;
       }
+    }
+
+    if enemy.move_tick % 2 == 0 {
+
     }
 
     for world.commands {
@@ -785,7 +815,7 @@ create_enemy :: (pos: SVector) {
 
         sees_player, t := has_line_of_sight(enemy, player, 8);
         if sees_player {
-          enemy.color = color(255, 20, 50, enemy.color.a);
+          enemy.color = color(ENEMY_COLOR.r, ENEMY_COLOR.g, ENEMY_COLOR.b, enemy.color.a);
         } else {
           enemy.color = color(90, 90, 90, enemy.color.a);
         }
@@ -849,15 +879,16 @@ open_closest_door :: (from: SVector) {
   }
 }
 
-tinkerer_place_wall :: (at: SVector) {
+tinkerer_place_wall :: (at: SVector) -> bool {
   e := find_entity_at(at);
   if e {
     // Check if e is a type of tile we are allowed to place blocks on?
     // TODO: Ask ALI
-    return;
+    return false;
   }
 
   create_wall(at);
+  return true;
 }
 
 find_entity_of_kind_at :: (kind: Entity_Kind, pos: SVector) -> *Entity {
@@ -910,7 +941,8 @@ create_player :: () {
       set(*cmd, EnemyKilled.{});
       entity_world_push_command(*world, cmd);
       
-      trigger_screen_shake(2, 1);
+      trigger_screen_shake(2, 0.5);
+      play_sfx("LOOPexplosionrandom.wav");
       return false;
     }
     if kind == .GOAL && game_state.level_goal == .REACH_END_WITH {
@@ -923,6 +955,7 @@ create_player :: () {
     if (!game_state.edit_mode && !walkable) || !is_valid(new_pos) || kind == .ENEMY then return false;
 
     set_player_pos(player, new_pos.x, new_pos.y);
+    play_sfx("LOOPwalk.wav", 0.5);
 
     if player.character_type == .SWIPER && is_zero(player.swiping_dir) {
       player.swiping_dir = delta;
@@ -936,30 +969,25 @@ create_player :: () {
     return entity.kind == .ENEMY; // TODO:
   }
 
-
   EXPLODABLE_KINDS :: Entity_Kind.[ .ENEMY, .WALL, .KILL_TILE, .FIRE, .DIGGABLE ];
-  EXPLODE_RADIUS: s16 : 2;
+  EXPLODE_RADIUS: s16 : 3;
   martyr_explode :: (origin: SVector) {
-    // 1. Create a temporary list to hold the IDs of entities to remove.
     ids_to_remove: [..]u32;
-    ids_to_remove.allocator = temp; // Use temporary storage
+    positions_exploded: [..]SVector;
+    positions_exploded.allocator = temp;
+    ids_to_remove.allocator = temp; 
 
-    // Find all entities within the radius that should be exploded.
     for y: -EXPLODE_RADIUS..EXPLODE_RADIUS {
         for x: -EXPLODE_RADIUS..EXPLODE_RADIUS {
             pos := origin + xy(x, y);
-
             if !is_valid(pos) continue;
-
-            // Find an entity at this position.
             maybe_e := find_entity_at(pos);
             if maybe_e {
-                // Check if its kind is in our list of explodable types.
                 for kind_to_check : EXPLODABLE_KINDS {
                     if maybe_e.kind == kind_to_check {
-                        // 2. Instead of removing, add its ID to our list.
                         array_add(*ids_to_remove, maybe_e.id);
-                        break; // Found a match, no need to check other kinds for this entity.
+                        array_add(*positions_exploded, maybe_e.pos);
+                        break; 
                     }
                 }
             }
@@ -971,8 +999,18 @@ create_player :: () {
         entity_world_remove(*world, id);
         entity_world_rebuild(*world);
     }
-  }
 
+    if ids_to_remove.count >= 1 {
+      trigger_screen_shake(3, 1);
+    }
+
+    // Leave fire on some of the exploded tiles
+    for positions_exploded {
+      if random_get() % 100 > 75 {
+        create_fire(it);
+      }
+    }
+  }
  
   update_player :: (player: *Entity, dt: float) {
     if game_state.state == .MENU {
@@ -1037,7 +1075,7 @@ create_player :: () {
           play_sfx("ui_move.wav");
           game_state.on_back_button = true;  
         }
-        game_state.editing_loop_index = clamp(game_state.editing_loop_index, 0, 3);
+        game_state.editing_loop_index = clamp(game_state.editing_loop_index, 0, 2);
       }
     }
     else if game_state.state == .PLAYING || game_state.state == .MENU {
@@ -1066,11 +1104,16 @@ create_player :: () {
               cmd: Command;
               set(*cmd, PlayerPerformedAction.{0});
               entity_world_push_command(*world, cmd);
+              play_sfx("LOOPlever.wav");
             }else {
-              tinkerer_place_wall(player.pos + input);
+              success := tinkerer_place_wall(player.pos + input);
               cmd: Command;
               set(*cmd, PlayerPerformedAction.{0});
               entity_world_push_command(*world, cmd);
+
+              if success {
+                play_sfx("LOOPlever.wav");
+              }
             }
             player.action_prepped = false;
           }
@@ -1080,13 +1123,21 @@ create_player :: () {
             cmd: Command;
             set(*cmd, PlayerPerformedAction.{1});
             entity_world_push_command(*world, cmd);
+            play_sfx("LOOPshoot14.wav");
           } else if player.character_type == .DIGGER && player.action_prepped {
+            // @Mechanic DIGGER can dig DIGGABLE's
             maybe_wall := find_entity_of_kind_at(Entity_Kind.DIGGABLE, player.pos + input);
             if maybe_wall {
               entity_world_remove(*world, maybe_wall.id);
               cmd: Command;
               set(*cmd, PlayerPerformedAction.{1});
               entity_world_push_command(*world, cmd);
+
+              if random_get_zero_to_one() > 0.5 {
+                play_sfx("LOOPdig.wav");
+              }else {
+                play_sfx("LOOPdig2.wav");
+              }
             }
             player.action_prepped = false;
           } else {
@@ -1113,30 +1164,16 @@ create_player :: () {
           if game_state.state == .PLAYING {
             game_state.loop_locked[game_state.current_loop_idx] = true;
           }
+          play_sfx("LOOPexplosionrandom.wav");
         }
 
         if rl.IsKeyPressed(.KEY_Y) {
           game_state.state = .GIVEN_UP;
         }
 
-        // Check if we're standing in the path of a laser
-        for laser : world.entity_groups[Entity_Kind.LASER] {
-          if laser.laser_state == .ON || laser.laser_state == .ON2 {
-            for pos : get_laser_path(laser) {
-              if pos == player.pos {
-                cmd: Command;
-                set(*cmd, PlayerDied.{});
-                entity_world_push_command(*world, cmd);
-                break;
-              }
-            }
-          }
-        }
-
         // Shake baby
         cell := *buffer[player.pos.x][player.pos.y];
         cell.shake = player.action_prepped;
-
       }
 
       if rl.IsKeyPressed(.KEY_R) {
@@ -1155,7 +1192,9 @@ create_player :: () {
       for world.commands {
         if isa(it, PlayerDied) {
           game_state.current_loop_idx = (game_state.current_loop_idx+1) % game_state.loop.count;
-          while game_state.loop_locked[game_state.current_loop_idx] game_state.current_loop_idx = (game_state.current_loop_idx+1) % game_state.loop.count;
+          while game_state.loop_locked[game_state.current_loop_idx] {
+            game_state.current_loop_idx = (game_state.current_loop_idx+1) % game_state.loop.count;
+          }
           
           if game_state.state == .MENU {
             game_state.current_loop_idx = game_state.tutorial_loop_idx;
@@ -1165,8 +1204,20 @@ create_player :: () {
           player.action_prepped = false;
           game_state.deaths += 1;
           trigger_screen_shake(2, 0.5);
+          play_sfx("LOOPdie.wav", 0.6);
 
           if game_state.state == .MENU {
+            // Remove all walls within a very given area
+            from := sxy(TUTORIAL_BOX_X+1, TUTORIAL_BOX_Y+1);
+            for x: from.x..from.x+1{
+              for y: from.y..from.y+1 {
+                maybe_wall := find_entity_of_kind_at(Entity_Kind.WALL, sxy(x,y));
+                if maybe_wall {
+                  entity_world_remove(*world, maybe_wall.id);
+                  entity_world_rebuild(*world);
+                }
+              }
+            }
             set_player_pos(player, TUTORIAL_BOX_X + 1, TUTORIAL_BOX_Y + 1);
           }else {
             set_player_pos(player, 1, 1);
@@ -1174,9 +1225,26 @@ create_player :: () {
         }
       }
 
+      // Check if we're standing in the path of a laser
+      if player.character_type != CharacterType.SWIPER {
+        for laser : world.entity_groups[Entity_Kind.LASER] {
+          if laser.laser_state == .ON || laser.laser_state == .ON2 {
+            for pos : get_laser_path(laser) {
+              if pos == player.pos {
+                cmd: Command;
+                set(*cmd, PlayerDied.{});
+                entity_world_push_command(*world, cmd);
+                player.pos = xy(1,1);
+                break;
+              }
+            }
+          }
+        }
+      }
+
   #if !RELEASE_BUILD {
       if rl.IsKeyPressed(.KEY_C) {
-        // create_wall(xy(player.pos.x, player.pos.y)); // Give birth, right here, right now
+        create_wall(xy(player.pos.x, player.pos.y)); // Give birth, right here, right now
       }
       if rl.IsKeyPressed(.KEY_TAB) then game_state.edit_mode = !game_state.edit_mode;
       // if rl.IsKeyPressed(.KEY_X) then trigger_screen_shake(5, 1);
@@ -1535,6 +1603,12 @@ glyph_basic_render_system :: () {
         cell.fg.a = 255;
       }
 
+      if game_state.state == .MENU && it.kind == .KILL_TILE {
+        if it.pos.y >= HELP_Y + 1 && game_state.tutorial_loop[game_state.tutorial_loop_idx] != CharacterType.MARTYR {
+          cell.fg.a = 0;
+        }
+      }
+
       cell.glyph = it.glyph;
     }
   }
@@ -1565,7 +1639,6 @@ is_basic_rendered :: (kind: Entity_Kind) -> bool {
 }
 
 glyph_basic_update_system :: (dt: float) {
-
   calculate_alpha :: (color: *rl.Color, pos: SVector, alpha_modifier: float) {
     player := world.entity_groups[Entity_Kind.PLAYER][0];
     // Basisc player litness
@@ -1616,6 +1689,67 @@ draw_string :: (start_x: s16, y: s16, str: string, background: rl.Color = rl.BLA
   }
 }
 
+draw_string_alloc :: (start_x: s16, y: s16, str: string, background: rl.Color = rl.BLANK, color: rl.Color = rl.WHITE, skip_blank: bool = false) -> [..]*Cell {
+  cells_drawn_to: [..]*Cell;
+  cells_drawn_to.allocator = temp;
+  x := start_x;
+  for i : 0..str.count-1 {
+    c := str[i];
+    if c == " "[0] && skip_blank {
+      x += 1;
+      continue;
+    };
+    cell := *buffer[x][y];
+    cell.glyph = c;
+    cell.fg = color;
+    cell.bg = background;
+    x += 1;
+
+    array_add(*cells_drawn_to, cell);
+  }  
+
+  return cells_drawn_to;
+}
+
+draw_string_centered :: (y: s16, str: string) {
+  x: s16 = (COLS/2 - str.count/2).(s16);
+  draw_string(x, y, str, skip_blank = true);
+}
+
+draw_string_centered_alloc :: (y: s16, str: string) -> [..]*Cell {
+  x: s16 = (COLS/2 - str.count/2).(s16);
+  return draw_string_alloc(x, y, str, skip_blank = true);
+}
+
+draw_help_text_for_current_character :: () {
+  help_text := "";
+  help_text_2 := "";
+  character_type := game_state.loop[game_state.current_loop_idx];
+  if character_type == {
+    case .SWIPER;
+      help_text = "KILL ENEMIES";
+    case .TINKERER;
+      help_text = "PLACE WALLS";
+      help_text_2 = "PULL L";
+    case .MARTYR;
+      help_text = "COVER UP GLITCH";
+      help_text_2 = "SPACE = EXPLODE";
+    case .DIGGER;
+      help_text = "DIG UP #";
+    case .WIZARD;
+      help_text = "FIREBALLS!";
+  }
+
+  text_color := CHARACTER_COLORS[character_type];
+
+  offset_x := max(help_text.count, help_text_2.count);
+  x := (CYCLE_START_X + 7).(s16);
+  y: s16 = CYCLE_Y-1;
+
+  draw_string(x, y, help_text, color=text_color);
+  draw_string(x, y+1, help_text_2, color=text_color);
+}
+
 render_ui_system :: () {
   y := UI_START_Y;
   glyph := 126;
@@ -1625,11 +1759,11 @@ render_ui_system :: () {
     cell.fg = ifx game_state.edit_mode then rl.PURPLE else rl.WHITE;
   }
 
+  background := rl.ColorAlpha(rl.WHITE, 0.05);
   for x: 0..COLS-1 {
     for y: UI_START_Y..ROWS-1 {
       cell := *buffer[x][y];
-      cell.bg = rl.WHITE;
-      cell.bg.a = 10;
+      cell.bg = ifx game_state.state == .MENU then rl.BLANK else background;
     }
   }
   if game_state.state == .PLAYING || game_state.state == .PICKING_LOOP {
@@ -1639,7 +1773,7 @@ render_ui_system :: () {
       cell.fg = rl.WHITE;
     }
 
-    for 0..3 {
+    for 0..2 {
       cell := *buffer[CYCLE_START_X+it][CYCLE_Y];
       cell.glyph = CHARACTER_GLYPHS[game_state.loop[it]].(int);
       cell.fg = CHARACTER_COLORS[game_state.loop[it]];
@@ -1657,6 +1791,10 @@ render_ui_system :: () {
       }
     }
 
+    flavor := get_goal_flavor_text();
+    x := (COLS - flavor.count - 2).(s16);
+    draw_string(x, GAME_AREA_SIZE+1, flavor, rl.ColorAlpha(rl.PURPLE, .5));
+
     if game_state.state == .PLAYING {
       draw_string(CYCLE_START_X, CYCLE_Y-1, "R=next");
       draw_string(CYCLE_START_X, CYCLE_Y-2, "Y=give up");
@@ -1667,10 +1805,6 @@ render_ui_system :: () {
       loops_done_str := tprint("loops=%/8", game_state.loops_done);
       x := (CYCLE_START_X+death_str.count+1).(s16);
       draw_string(x, CYCLE_Y+2, loops_done_str);
-
-      flavor := get_goal_flavor_text();
-      x = (COLS - flavor.count).(s16);
-      draw_string(x, CYCLE_Y+3, flavor, rl.ColorAlpha(rl.PURPLE, .5));
 
       if game_state.level_goal == .COLLECT_COINS {
         coins_left := world.entity_groups[Entity_Kind.COIN].count;
@@ -1685,9 +1819,11 @@ render_ui_system :: () {
         draw_string(x, CYCLE_Y+3, text);
       }
 
+      draw_help_text_for_current_character();
+
     } else if game_state.state == .PICKING_LOOP {
       mod_your_loop :: "MOD YOUR LOOP";
-      draw_string(CYCLE_START_X, CYCLE_Y-2, mod_your_loop, rl.ColorAlpha(rl.PURPLE, .5));
+      draw_string_alloc(CYCLE_START_X, CYCLE_Y-2, mod_your_loop, rl.ColorAlpha(rl.PURPLE, .5));
       // TODO: 
       // for x: CYCLE_START_X..CYCLE_START_X + mod_your_loop.count {
       //   cell := *buffer[x][CYCLE_Y-2];
@@ -1717,20 +1853,23 @@ render_ui_system :: () {
     }
   }
   else if game_state.state == .MENU {
-    prompt := "PRESS X TO PLAY";
+    prompt := "SINGLE STORY DUNGEON";
+    draw_string_centered(4, prompt);
+
+    prompt = "PRESS X TO PLAY";
     x := (COLS/2)-prompt.count/2-1;
     draw_string(x.(s16), 6, prompt);
 
-    draw_string_centered :: (y: s16, str: string) {
-      x: s16 = (COLS/2 - str.count/2).(s16);
-      draw_string(x, y, str, skip_blank = true);
-    }
+    // Draw some credits
+    draw_string(0, ROWS-3, "A GAME BY:");
+    draw_string(0, ROWS-2, "David Styrbjorn: Programming & Design");
+    draw_string(0, ROWS-1, "ADking: Sound & Design");
 
     draw_string_centered(TUTORIAL_BOX_Y - 2, "WASD = MOVE");
     draw_string_centered(TUTORIAL_BOX_Y - 3, "R = NEXT");
 
     if world.entity_groups[Entity_Kind.ENEMY].count == 0 {
-      draw_string_centered(5, "COOL SHIT MAN!");
+      draw_string_centered(5, "Tutorial Complete");
     }
 
     // Display some info about the current tutorial character
@@ -1742,20 +1881,26 @@ render_ui_system :: () {
         x: s16 = (COLS/2 - str.count/2).(s16);
         draw_string(x, HELP_Y, str, color = CHARACTER_COLORS[character_type]);
         draw_string_centered(HELP_Y+2, "SPACE + WASD = PLACE WALL");
-        draw_string_centered(HELP_Y+3, "SPACE + WASD + L = OPEN DOOR");
+        left_string := "SPACE + WASD + ";
+        start_x: s16 = 6;
+        draw_string(start_x, HELP_Y+3, "SPACE + WASD + ");
+        l_x: s16 = (start_x+left_string.count).(s16);
+        draw_string(l_x, HELP_Y+3, "L", color = color(0, 139, 139));
+        right_x: s16 = (start_x + left_string.count + 1).(s16);
+        draw_string(right_x, HELP_Y+3, " = OPEN DOOR");
       case .SWIPER;
-        str := "SWIPER";
+        str := "DASHER";
         x: s16 = (COLS/2 - str.count/2).(s16);
         draw_string(x, HELP_Y, str, color = CHARACTER_COLORS[character_type]);
         draw_string_centered(HELP_Y+2, "WASD = DASH");
         draw_string_centered(HELP_Y+3, "DASH KILLS ENEMY");
       case .MARTYR;
-        str := "MARTYR";
+        str := "BOMB";
         x: s16 = (COLS/2 - str.count/2).(s16);
         draw_string(x, HELP_Y, str, color = CHARACTER_COLORS[character_type]);
         draw_string_centered(HELP_Y+2, "WALK ON   = COVER IT UP");
       case .DIGGER;
-        str := "DIGGER";
+        str := "DWARF";
         x: s16 = (COLS/2 - str.count/2).(s16);
         draw_string(x, HELP_Y, str, color = CHARACTER_COLORS[character_type]);
         draw_string_centered(HELP_Y+2, "SPACE + WASD = DIG #");
@@ -1769,6 +1914,19 @@ render_ui_system :: () {
 }
 
 pick_character_to_end_with :: () {
+  has_swiper := false;
+  for game_state.loop {
+    if it == .SWIPER has_swiper = true;
+  }
+
+  // Fake bias towards picking the swiper if the player has the swiper selected
+  if has_swiper {
+    if random_get() % 100 > 50 {
+      game_state.reach_end_with = .SWIPER;
+      return;
+    }
+  }
+
   POSSIBLE_EXIT_CHARACTERS :: CharacterType.[ .SWIPER, .TINKERER, .DIGGER, .WIZARD ];
   while true {
     maybe_character := POSSIBLE_EXIT_CHARACTERS[random_get() % POSSIBLE_EXIT_CHARACTERS.count.(u64)];
@@ -1811,7 +1969,7 @@ level_completed :: (from_pos: SVector) {
     }
   }
 
-  play_sfx("LOOPend.wav", 0.65);
+  play_sfx("LOOPend.wav", 0.25);
 
   cmd: Command;
   set(*cmd, LevelCompleted.{});
@@ -1900,10 +2058,25 @@ transition_system :: (dt: float) {
   if game_state.state != .TRANSITION then return;
   if game_state.transition_out then game_state.transition_t += dt*1.05;
   else game_state.transition_t -= dt;
-
-  if game_state.transition_out && game_state.transition_t > 1.0 {
+  cmd: Command;
+  set(*cmd, LightUpdate.{});
+  entity_world_push_command(*world, cmd);
+  
+  goal_t := ifx game_state.loops_done == 9 then 2.0 else 1.0; 
+  if game_state.transition_out && game_state.transition_t > goal_t {
     game_state.transition_out = false;
     game_state.transition_origin = xy(1.0, 1.0);
+
+    if game_state.loops_done == 9 {
+      game_state.state = .WON;
+      for y : 0..ROWS-1 {
+        for x : 0..COLS-1 {
+          cell := *buffer[x][y];
+          cell.override_flag = false;
+          cell.prev_override_flag = false;
+        }
+      }
+    }
     
     if game_state.spawn_level_flag {
       create_level();
@@ -1966,11 +2139,13 @@ vision_render_system :: () {
         for goal : world.entity_groups[Entity_Kind.GOAL] {
           cell := *buffer[goal.pos.x][goal.pos.y];
           cell.fg.a = 255;
+          cell.shake = true;
         }
       case .COLLECT_COINS;
         for coin : world.entity_groups[Entity_Kind.COIN] {
           cell := *buffer[coin.pos.x][coin.pos.y];
           cell.fg.a = 255;
+          cell.shake = true;
         }
       case .KILL_ALL_ENEMIES;
         for enemy : world.entity_groups[Entity_Kind.ENEMY] {
@@ -2031,10 +2206,12 @@ menu_system :: (dt: float) {
   if game_state.state != .MENU then return;
   
   if rl.IsKeyPressed(.KEY_X) {
+    player := world.entity_groups[Entity_Kind.PLAYER][0];
+
     // Initalise a transition
     game_state.state = .TRANSITION;
     game_state.transition_t = 0.0;
-    game_state.transition_origin = xy(COLS/2.0, ROWS/2.0);
+    game_state.transition_origin = xy(player.pos.x.(float), player.pos.y.(float));
     game_state.transition_out = true;
     game_state.spawn_level_flag = true;
     for y : 0..ROWS-1 {
@@ -2047,9 +2224,10 @@ menu_system :: (dt: float) {
 
     game_state.deaths = 0;
     game_state.current_loop_idx = 0;
+    player.action_prepped = false;
 
     // Destroy all tutorial entities!
-    player := world.entity_groups[Entity_Kind.PLAYER][0];
+    
     player.pos = sxy(1,1);
 
     ids: [..]u32;
@@ -2078,11 +2256,17 @@ menu_system :: (dt: float) {
     for world.entity_groups[Entity_Kind.FIRE] {
       array_add(*ids, it.id);
     }
+    for world.entity_groups[Entity_Kind.DEAD_MARTYR] {
+      array_add(*ids, it.id);
+    }
+
 
     for ids {
       entity_world_remove(*world, it);
       entity_world_rebuild(*world);
     }
+
+    start_playing_main_music();
   }
 }
 
@@ -2129,39 +2313,61 @@ play_sfx :: (name: string, volume: float = 1.0) {
     print("Failed to play sfx %", name);
     return;
   }
-  // rl.SetSoundVolume(sound, volume);
-  print("playing sfx %\n", name);
+  rl.SetSoundVolume(sound, volume);
   rl.PlaySound(sound);
 }
 
 draw_given_up_ui :: () {
-  // --- Calculate the center of the screen ---
   center_x := COLS / 2;
   center_y := ROWS / 2;
 
   // --- Main Title ---
   title := "YOU GAVE UP";
   title_x := center_x - (title.count / 2);
-  // Position the entire text block so it's centered. We'll start the title
-  // a few lines above the absolute center.
   start_y := center_y - 4;
   draw_string(title_x.(s16), start_y, title, rl.BLANK);
 
-  // --- Final Stats ---
   floors_str := tprint("Loops Done=%", game_state.loops_done);
   loops_str  := tprint("Deaths=%", game_state.deaths);
-  
+  score := (game_state.loops_done*10) - game_state.deaths;
+  score_str := tprint("Score = %", score);
+
   floors_x := center_x - (floors_str.count / 2);
   loops_x  := center_x - (loops_str.count / 2);
 
-  // Draw the stats two lines below the title
   draw_string(floors_x.(s16), start_y + 2, floors_str, rl.BLANK);
   draw_string(loops_x.(s16), start_y + 3, loops_str, rl.BLANK);
+  
+  draw_string_centered(start_y+5, score_str);
 
-  // --- Prompt to restart ---
   prompt := "Restart the game to play again...";
   prompt_x := center_x - (prompt.count / 2);
   // Draw the prompt a few lines below the stats
+  draw_string(prompt_x.(s16), start_y + 6, prompt, rl.BLANK);
+}
+
+draw_won_ui :: () {
+  center_x := COLS / 2;
+  center_y := ROWS / 2;
+
+  // --- Main Title ---
+  title := "LOOP ESCAPED...";
+  title_x := center_x - (title.count / 2);
+  start_y := center_y - 4;
+  draw_string(title_x.(s16), start_y, title, rl.BLANK, color=rl.PURPLE);
+
+  score := (game_state.loops_done*10) - game_state.deaths;
+  score_str := tprint("Score = %", score);
+
+  avg_death_per_loop := game_state.deaths / game_state.loops_done;
+  avg_str := tprint("Average death/loop = %", avg_death_per_loop);
+
+  draw_string_centered(start_y+5, score_str);
+  draw_string_centered(start_y+6, "Score above 0 is GOOD");
+  draw_string_centered(start_y+7, avg_str);
+
+  prompt := "Thanks for playing!";
+  prompt_x := center_x - (prompt.count / 2);
   draw_string(prompt_x.(s16), start_y + 6, prompt, rl.BLANK);
 }
 
@@ -2242,7 +2448,6 @@ create_tutorial_box :: () {
   create_wall(xy(30, 27));
   create_wall(xy(31, 27));
   create_wall(xy(32, 27));
-  create_kill_tile(xy(17, 32));
   create_wall(xy(11, 14));
   create_wall(xy(11, 15));
   create_wall(xy(11, 16));
@@ -2278,6 +2483,8 @@ create_tutorial_box :: () {
   create_wall(xy(11, 21));
   create_kill_tile(xy(10, 21));
   create_enemy(xy(10, 25));
+  create_kill_tile(xy(11, 24));
+  create_kill_tile(xy(10, 26));
   create_enemy(xy(24, 21));
   create_enemy(xy(28, 22));
   create_enemy(xy(27, 19));
@@ -2288,7 +2495,11 @@ create_tutorial_box :: () {
   player := world.entity_groups[Entity_Kind.PLAYER][0];
   player.pos = sxy(TUTORIAL_BOX_X + 1, TUTORIAL_BOX_Y + 1);
 
-  create_kill_tile(xy(17, HELP_Y+3));
+  create_kill_tile(xy(17, HELP_Y+2));
+}
+
+start_playing_main_music :: () {
+  rl.PlayMusicStream(game_state.music_intro);
 }
 
 main :: () {
@@ -2319,10 +2530,10 @@ main :: () {
   entity_world_rebuild(*world);
 
   // Init the loop variable with a bunch of character states...
-  game_state.loop[0] = CharacterType.SWIPER;
-  game_state.loop[1] = CharacterType.TINKERER;
+  game_state.loop[0] = CharacterType.TINKERER;
+  game_state.loop[1] = CharacterType.DIGGER;
   game_state.loop[2] = CharacterType.MARTYR;
-  game_state.loop[3] = CharacterType.DIGGER;
+  // game_state.loop[3] = CharacterType.DIGGER;
   
   game_state.tutorial_loop[0] = CharacterType.TINKERER;
   game_state.tutorial_loop[1] = CharacterType.DIGGER;
@@ -2359,8 +2570,6 @@ main :: () {
   game_state.music_intro = rl.LoadMusicStream("audio/bg-intro.mp3");
   game_state.music_loop = rl.LoadMusicStream("audio/bg-loop.mp3");
   game_state.music_loop.looping = true;
-  rl.PlayMusicStream(game_state.music_intro);
-  intro_finished: bool = false;
   defer rl.UnloadMusicStream(game_state.music_intro);
   defer rl.UnloadMusicStream(game_state.music_loop);
 
@@ -2371,12 +2580,12 @@ main :: () {
     dt := rl.GetFrameTime();
 
     // Music related
-    if !intro_finished {
+    if !game_state.intro_finished {
       rl.UpdateMusicStream(game_state.music_intro);
       if rl.GetMusicTimePlayed(game_state.music_intro) >= rl.GetMusicTimeLength(game_state.music_intro) {
         rl.StopMusicStream(game_state.music_intro);
         rl.PlayMusicStream(game_state.music_loop);
-        intro_finished = true;
+        game_state.intro_finished = true;
       }
     }else {
       rl.UpdateMusicStream(game_state.music_loop);
@@ -2408,6 +2617,11 @@ main :: () {
       draw_given_up_ui();
     }
 
+    if game_state.state == .WON {
+      clear_play_area();
+      draw_won_ui();
+    }
+
     shake_offset := Vector2.{ 0, 0 };
     if game_state.shake_duration > 0 {
       game_state.shake_duration -= dt;
@@ -2420,7 +2634,9 @@ main :: () {
     }
 
     rl.BeginDrawing();
-      rl.ClearBackground(rl.BLACK);
+      // rl.ClearBackground(color(10, 10, 10, 255));
+      // rl.ClearBackground(color(32, 28, 28, 255));
+      rl.ClearBackground(color(20, 20, 20, 255));
       // Draw the buffer
       for y : 0..ROWS-1 {
         for x : 0..COLS-1 {

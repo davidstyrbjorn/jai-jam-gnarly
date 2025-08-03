@@ -14,9 +14,9 @@ LEVEL_FOLDER :: "empty_levels";
 }
 else 
 {
-TOP_LEFT_COUNT :: 2;
-TOP_RIGHT_COUNT :: 2;
-BOTTOM_LEFT_COUNT :: 2;
+TOP_LEFT_COUNT :: 3;
+TOP_RIGHT_COUNT :: 4;
+BOTTOM_LEFT_COUNT :: 4;
 BOTTOM_RIGHT_COUNT :: 2;
 LEVEL_FOLDER :: "levels";
 }
@@ -71,4 +71,3 @@ TOP_RIGHT :: #run -> []string {
   print("top_right count = %\n", TOP_RIGHT_COUNT);
   return loaded_strings;
 };
-
