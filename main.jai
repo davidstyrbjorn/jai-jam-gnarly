@@ -1,4 +1,4 @@
-RELEASE_BUILD :: true;
+RELEASE_BUILD :: false;
 
 #if RELEASE_BUILD {
   #if OS == .WINDOWS {
@@ -162,7 +162,6 @@ PlayerMove :: struct {
   new_pos: SVector;
   player: *Entity;
 }
-
 LightUpdate :: struct {}
 PlayerDied :: struct {}
 FireballMove :: struct { _: bool; }
@@ -787,20 +786,18 @@ create_enemy :: (pos: SVector) {
     // Check if we're hit by a fireball
     for fireball : world.entity_groups[Entity_Kind.FIREBALL] {
       if fireball.pos == enemy.pos {
-        create_fire(enemy.pos);
         entity_world_remove(*world, enemy.id);
         entity_world_remove(*world, fireball.id);
+
         cmd: Command;
         set(*cmd, EnemyKilled.{});
         entity_world_push_command(*world, cmd);
+
         trigger_screen_shake(2, 1);
         play_sfx("LOOPexplosionrandom.wav");
+        create_fire(enemy.pos);
         break;
       }
-    }
-
-    if enemy.move_tick % 2 == 0 {
-
     }
 
     for world.commands {
@@ -1434,6 +1431,7 @@ flood_fill_walls :: (pos: SVector) {
     entity_world_rebuild(*world);
 }
 
+#if OS != .MACOS {
 edit_system :: (dt: float) {
   if !game_state.edit_mode then return;
 
@@ -1589,6 +1587,7 @@ edit_system :: (dt: float) {
       }
     }
   }
+}
 }
 
 glyph_basic_render_system :: () {
@@ -2547,7 +2546,9 @@ main :: () {
   set(*command, PlayerMove.{ player.pos, player.pos, player });
   entity_world_push_command(*world, command);
 
+#if OS != .MACOS {
   rl.GuiSetStyle(0, rl.GuiDefaultProperty.TEXT_SIZE.(s32), 20);
+}
   game_state.selected_point.x = -1;
 
   rl.InitAudioDevice();
@@ -2683,7 +2684,9 @@ main :: () {
         }
       }
 
+#if OS != .MACOS {
       edit_system(dt);
+}
 
     rl.EndDrawing();
   }
